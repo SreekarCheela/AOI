@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Dataset payloads are large and pulled fresh via `aoi-pipeline download-datasets`.
+# Only the small checked-in fixtures under data/sample/ are tracked.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Local capture logs / correlation output from running the demo pipeline.
+*.jsonl
+!tests/fixtures/*.jsonl
+
+.env
+.kaggle/

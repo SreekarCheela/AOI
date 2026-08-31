@@ -1,0 +1,26 @@
+[project]
+name = "aoi-pipeline"
+version = "0.1.0"
+description = "Data pipeline for AOI-replacement pretraining data, edge-device capture logging, and AOI-verdict correlation"
+requires-python = ">=3.10"
+dependencies = [
+    "kagglehub>=0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[project.scripts]
+aoi-pipeline = "aoi_pipeline.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
