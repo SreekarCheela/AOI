@@ -1,0 +1,9 @@
+data/raw/
+data/manifest.csv
+checkpoints/*.pt
+checkpoints/history.json
+reports/*.md
+reports/*.json
+.smoke_test_tmp/
+__pycache__/
+*.pyc

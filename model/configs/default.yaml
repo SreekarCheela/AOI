@@ -1,0 +1,35 @@
+# Default training config for whole-board solder-joint classification.
+# Override any of these via `train.py --config path/to/other.yaml` or CLI flags.
+
+model:
+  backbone: mobilenet_v3_large   # or mobilenet_v3_small for a lighter/faster fallback
+  pretrained: true
+  dropout: 0.2
+
+data:
+  manifest: data/manifest.csv    # produced by data/prepare_manifest.py
+  image_size: 224
+  batch_size: 32
+  num_workers: 4
+  val_fraction: 0.15
+  test_fraction: 0.15            # held-out split used for the baseline eval report
+  split_seed: 42
+
+train:
+  epochs: 20
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  optimizer: adamw
+  pass_fail_loss_weight: 1.5     # weighted higher: graded metrics (agreement/escape/
+                                  # false-reject rate) are all pass/fail-based
+  defect_type_loss_weight: 1.0
+  freeze_backbone_epochs: 3      # linear-probe the heads first, then unfreeze for full fine-tune
+  early_stopping_patience: 5
+  checkpoint_dir: checkpoints
+  seed: 42
+  device: auto                   # auto | cpu | cuda | mps
+
+eval:
+  pass_fail_threshold: 0.5
+  defect_type_threshold: 0.5
+  report_dir: reports

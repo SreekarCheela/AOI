@@ -1,0 +1,7 @@
+torch
+torchvision
+kaggle
+kagglehub
+scikit-learn
+pyyaml
+pillow
