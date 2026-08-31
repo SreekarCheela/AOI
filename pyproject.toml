@@ -1,0 +1,9 @@
+[project]
+name = "shadow-analysis"
+version = "0.1.0"
+description = "Offline shadow-mode comparison and analysis pipeline (AOI issue #6)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
