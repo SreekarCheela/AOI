@@ -89,10 +89,6 @@ BAND_MAHALANOBIS_FAIL: float = 6.0
 BAND_COV_RIDGE: float = 0.15    # shrink off-diagonals toward a diagonal matrix
 BAND_COV_FLOOR: float = 0.01    # absolute floor on per-band std, as for band_std
 
-# Used only before any golden model exists (rule layer running from a cold
-# start). Package-relative gating is not available then.
-NCC_FAIL_UNTAUGHT: float = 0.62
-
 DEFECT_CLASSES: tuple[str, ...] = (
     "ok", "missing", "offset", "skew", "reversed", "insufficient", "bridge", "tombstone",
 )

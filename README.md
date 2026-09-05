@@ -255,6 +255,16 @@ reason to develop on synthetic data first.
   the pipeline just corrected — which reads to an operator as a broken machine.
 - **Anomaly models are per package family, never global.** See above; this one
   costs an order of magnitude.
+- **An unknown must not be representable as a bad reading.** `measure` returned
+  early for a package teach never saw, leaving `ncc` at its 0.0 default — and
+  0.0 is a real measurement, the one a totally wrong part scores. Every
+  threshold downstream read "not measured" as "grossly defective", so a single
+  unprogrammed package flagged every instance of itself. On a real board with
+  fifteen package families against a library of five, that is a false call on a
+  large fraction of the board. Unmeasurable fields are NaN now, and the verdict
+  has a third state. The temptation is to suppress the noise by passing those
+  parts instead; that trades a false-call problem for an escape problem, which
+  is strictly worse.
 - **Measure the thing you are deciding about.** Presence was a correlation
   score for three rounds of threshold tuning, and each round moved a number that
   could not answer the question being asked of it: NCC says how well a crop
@@ -344,12 +354,12 @@ stays on the workstation.
   the correlation peak past the 150 µm placement limit and the offset test runs
   first. Body localisation does not help: a rotated body is still lying flat and
   still spans its own length.
-- A package the golden set never covered flags every instance of it as
-  "missing", because `measure` returns before scoring NCC and the untaught
-  branch reads the 0.0 default as an absent part. On a real board that is a
-  false-call storm for any package the teach boards happened not to carry. The
-  fix is a verdict state meaning "untestable", which the rule layer does not
-  have yet.
+- A package teach never saw is reported as **not inspected**, not as a defect
+  and not as a pass. It cannot be judged: every test compares against a golden
+  statistic for that package. The board report names the coverage gap once
+  rather than flagging every instance, and the defect map crosses those
+  components through in grey. A genuine defect on an unprogrammed package will
+  not be caught, which is why it is never reported as good.
 - The subspace anomaly model assumes patches stay well canonicalised. Real
   boards vary more than synthetic ones; if separation degrades, EfficientAD with
   a pretrained teacher is the upgrade path, not a bigger autoencoder.

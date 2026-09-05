@@ -96,6 +96,12 @@ def cmd_demo(a: argparse.Namespace) -> None:
           f"dy={res.align_shift_mm[1]:+.3f} mm, rot={res.align_rot_deg:+.3f} deg")
     print(f"inspect: {res.summary()}")
 
+    if res.untestable:
+        print(f"\nNOT INSPECTED: {len(res.untestable)} components have no golden "
+              f"model ({', '.join(res.untaught_packages)}).")
+        print("  These are a coverage gap in the program, not defects. Teach them "
+              "before releasing the board.")
+
     truth = set(defects)
     flagged = {v.refdes for v in res.failed}
     caught, missed, false = truth & flagged, truth - flagged, flagged - truth

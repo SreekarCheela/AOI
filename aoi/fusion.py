@@ -27,6 +27,13 @@ class Verdict:
     score: float           # 0..1, higher = more likely a real defect
     reason: str
     detail: str = ""
+    testable: bool = True  # False = no inspection program for this package, so
+                           # this component was not judged either way
+
+    @property
+    def passed(self) -> bool:
+        """Inspected and found good. An untestable component is neither."""
+        return self.testable and not self.failed
 
 
 def rule_verdict(m: Measure, golden: Golden) -> Verdict:
@@ -86,9 +93,18 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
                      1.0 - m.body_aspect / config.BODY_STANDING_ASPECT,
                      f"body spans {m.body_aspect:.2f}x its own width, standing "
                      f"on one land")
-    elif m.ncc < config.NCC_FAIL_UNTAUGHT:
-        # No golden model, so there is nothing to segment against either.
-        return V("missing", 1.0 - m.ncc, f"NCC {m.ncc:.2f}, untaught package")
+    else:
+        # No golden statistics for this package, so every test above and below
+        # has nothing to compare against -- correlation, band distances, the
+        # segmentation thresholds, all of it is learned at teach. This component
+        # is not good and not bad, it is UNINSPECTED, and saying so is the whole
+        # point: calling it a defect turns one unprogrammed package into a false
+        # call on every instance of it, which is the failure mode section 8 says
+        # decides the project. It is reported once at board level as a coverage
+        # gap instead of N times as a defect.
+        return Verdict(m.refdes, m.package, False, 0.0, "untaught",
+                       f"no golden model for {m.package}; component not inspected",
+                       testable=False)
 
     # 3. reversed. Safe here now: a part standing on end was already caught
     #    above, and it was exactly that case which used to flip the 180 degree

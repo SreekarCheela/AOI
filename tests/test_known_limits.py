@@ -18,6 +18,11 @@ FIXED AND MOVED OUT
   displacement on 0603/0805 read 'missing'. Both were the same root cause: NCC
   cannot say WHERE the body went, so absent and elsewhere were indistinguishable.
   Fixed by measuring the body's position and extent. Covered in test_body.py.
+
+  A package teach never saw flagged every instance of itself as missing, because
+  measure left ncc at its 0.0 default and 0.0 is a real measurement meaning
+  "correlates with nothing". Fixed by making unmeasurable fields NaN and adding
+  an uninspected verdict state. Covered in test_untaught.py.
 """
 from __future__ import annotations
 
@@ -61,21 +66,3 @@ def test_skew_on_tall_packages_is_labelled_skew(brd, golden, refdes, package):
     m = rules.measure(render_with(brd, {refdes: synth.Defect("skew", dtheta=20.0)}),
                       brd.by_refdes(refdes), golden)
     assert rule_verdict(m, golden).reason == "skew"
-
-
-@pytest.mark.xfail(strict=False, reason=(
-    "A package the golden set never covered flags every instance of it as "
-    "'missing'. rules.measure returns early when there is no golden entry, "
-    "leaving ncc at its 0.0 default, and the untaught branch of the presence "
-    "gate reads that as an absent part. Body localisation cannot help: the "
-    "segmentation thresholds are themselves learned at teach, so an untaught "
-    "package has nothing to segment against either. On a real board this is a "
-    "false-call storm for any package the teach boards did not carry. The fix "
-    "is to report these as untestable rather than failed, which needs a verdict "
-    "state the rule layer does not currently have."))
-def test_untaught_package_does_not_flag_good_parts(brd, golden):
-    empty = rules.Golden()
-    stack = render_with(brd, {})
-    flagged = [c.refdes for c in brd.components
-               if rule_verdict(rules.measure(stack, c, empty), empty).failed]
-    assert not flagged, f"{len(flagged)} good parts flagged with no golden model: {flagged}"

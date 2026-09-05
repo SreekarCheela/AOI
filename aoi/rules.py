@@ -352,7 +352,17 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
 
     g = golden.packages.get(comp.package)
     if g is None:
+        # Nothing here can be judged: every test compares against a golden
+        # statistic for this package, and there is not one. Say so with NaN
+        # rather than leaving the defaults, because 0.0 is a perfectly good
+        # measurement meaning "correlates with nothing" and every downstream
+        # threshold reads it as a gross fault. An unknown that looks like a
+        # defect is how one unprogrammed package flags a whole board.
         m.bands = band_fractions(region, pkg)
+        m.ncc = m.dx_um = m.dy_um = m.dtheta_deg = float("nan")
+        m.pol_margin = m.contrast_ratio = m.band_maha = float("nan")
+        m.body_area_ratio = m.body_aspect = m.body_shift_um = float("nan")
+        m.body_clipped = float("nan")
         return m
 
     # z-score, not a ratio: the golden mean passes through zero for some

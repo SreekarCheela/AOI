@@ -31,10 +31,28 @@ class Result:
     def failed(self) -> list[Verdict]:
         return [v for v in self.verdicts if v.failed]
 
+    @property
+    def untestable(self) -> list[Verdict]:
+        """Components with no inspection program, so never judged either way.
+
+        Kept apart from `failed` on purpose. These are a coverage gap in the
+        program, not defects on the board, and mixing them into the review queue
+        is how one unprogrammed package buries the real defects.
+        """
+        return [v for v in self.verdicts if not v.testable]
+
+    @property
+    def untaught_packages(self) -> list[str]:
+        return sorted({v.package for v in self.untestable})
+
     def summary(self) -> str:
-        f = self.failed
-        return (f"{len(self.verdicts)} components, {len(f)} flagged "
-                f"({100.0 * len(f) / max(1, len(self.verdicts)):.1f}%) in {self.seconds:.2f}s")
+        f, u = self.failed, self.untestable
+        s = (f"{len(self.verdicts)} components, {len(f)} flagged "
+             f"({100.0 * len(f) / max(1, len(self.verdicts)):.1f}%) in {self.seconds:.2f}s")
+        if u:
+            s += (f"   NOT INSPECTED {len(u)} "
+                  f"({', '.join(self.untaught_packages)} not taught)")
+        return s
 
 
 # ------------------------------------------------------------------ alignment
@@ -124,6 +142,12 @@ class Inspector:
             scores = self.fusion.score(X)
             for m, s in zip(res.measures, scores):
                 rv = rule_verdict(m, self.golden)
+                if not rv.testable:
+                    # The tree cannot judge what the rules could not measure --
+                    # every feature it would use is NaN. Untestable survives the
+                    # fusion layer unchanged.
+                    res.verdicts.append(rv)
+                    continue
                 res.verdicts.append(Verdict(m.refdes, m.package, bool(s >= self.fail_threshold),
                                             float(s), rv.reason if rv.failed else "ok",
                                             rv.detail))
@@ -135,7 +159,8 @@ class Inspector:
 
 
 # --------------------------------------------------------------------- report
-_COL = {"ok": (90, 190, 90), "missing": (60, 60, 235), "offset": (40, 170, 240),
+_COL = {"ok": (90, 190, 90), "untaught": (150, 150, 150),
+        "missing": (60, 60, 235), "offset": (40, 170, 240),
         "skew": (40, 210, 240), "reversed": (200, 80, 220), "insufficient": (70, 70, 240),
         "bridge": (240, 120, 60), "tombstone": (90, 40, 200)}
 
@@ -155,6 +180,11 @@ def defect_map(stack: np.ndarray, board: Board, result: Result, path: str,
         pts = (roi.local_to_board(comp, h) / config.MM_PER_PX).astype(np.int32)
         col = _COL.get(v.reason, (90, 190, 90))
         cv2.polylines(img, [pts], True, col, 2 if v.failed else 1, cv2.LINE_AA)
+        if not v.testable:
+            # Grey and crossed through: the operator has to be able to see at a
+            # glance which parts the machine never actually looked at.
+            cv2.line(img, tuple(pts[0]), tuple(pts[2]), col, 1, cv2.LINE_AA)
+            cv2.line(img, tuple(pts[1]), tuple(pts[3]), col, 1, cv2.LINE_AA)
         if v.failed:
             p = pts.min(axis=0)
             cv2.putText(img, f"{comp.refdes} {v.reason}", (int(p[0]), int(p[1]) - 5),

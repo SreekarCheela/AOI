@@ -6,7 +6,9 @@ that survived the change, and they are what this file pins.
 
   * a second opinion before a part is called missing, so a segmentation that
     fails wholesale cannot flag a whole board
-  * the cold-start path, before teach has seen a package at all
+
+A package teach never saw is no longer handled here at all: it is uninspected
+rather than gated on any threshold, and test_untaught.py owns that.
 
 The history is worth keeping. Presence was once a global `ncc < 0.62`, which
 could not mean the same thing for two packages -- an 0603 matches its own
@@ -83,47 +85,3 @@ def test_tombstone_detection_does_not_depend_on_which_pad_survives(brd, golden, 
         got.append(rule_verdict(m, golden).reason)
     assert got[0] == got[1], \
         f"{package} tombstone reads {got[0]!r} on pad 0 but {got[1]!r} on pad 1"
-
-
-# ------------------------------------------- displaced parts are not tombstones
-@pytest.mark.parametrize("package", CHIPS)
-def test_a_displaced_part_is_not_called_a_tombstone(brd, golden, package):
-    """The guard that lets the gate stay strict.
-
-    A part that walked off its lands also has a degraded NCC and a dead joint,
-    so NCC alone cannot tell it from a tombstone. The difference is that a
-    tombstone's surviving joint is fully formed (the part IS soldered, at one
-    end) while a displaced part has both joints compromised. Mislabelling here
-    sends the operator to a reflow problem when the fault is placement.
-    """
-    refdes = CHIP_REFDES[package]
-    stack = render_with(brd, {refdes: synth.Defect("offset", dx=0.25)})
-    m = rules.measure(stack, brd.by_refdes(refdes), golden)
-    verdict = rule_verdict(m, golden)
-    assert verdict.failed
-    assert verdict.reason != "tombstone", (
-        f"{package} displaced 250 um reported as a tombstone "
-        f"(ncc={m.ncc:.3f})")
-
-
-@pytest.mark.parametrize("package", CHIPS)
-def test_missing_is_still_missing(brd, golden, package):
-    """The gate's other exit. Nothing wetted and no body means nothing was
-    placed, and that must survive the rewrite."""
-    refdes = CHIP_REFDES[package]
-    stack = render_with(brd, {refdes: synth.Defect("missing")})
-    m = rules.measure(stack, brd.by_refdes(refdes), golden)
-    assert rule_verdict(m, golden).reason == "missing"
-def test_untaught_package_still_uses_the_absolute_threshold(brd, golden):
-    """The cold-start path is unchanged by the package-relative gate.
-
-    With no golden entry there is no distribution to be relative to, so the
-    absolute constant is still the only thing available. This pins that the
-    rewrite left that branch alone; what the branch actually does with an
-    untaught package is a separate problem, recorded in test_known_limits.py.
-    """
-    empty = rules.Golden()
-    m = rules.measure(render_with(brd, {"R1": synth.Defect("missing")}),
-                      brd.by_refdes("R1"), empty)
-    assert m.ncc < config.NCC_FAIL_UNTAUGHT
-    assert rule_verdict(m, empty).reason == "missing"
