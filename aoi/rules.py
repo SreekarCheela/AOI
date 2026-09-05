@@ -1,0 +1,284 @@
+"""Rule-based measurements and the golden reference they are compared against.
+
+These produce numbers, not verdicts: band fractions, offsets in microns, NCC
+scores. The verdict is `fusion`'s job. Keeping measurement and decision apart is
+what makes the machine debuggable eighteen months from now (spec section 6).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+
+from . import config, roi
+from .board import Board, Component
+from .packages import Package
+
+# Must extend well past MAX_SKEW_DEG: a search that stops at the tolerance can
+# only ever report the tolerance, so a 20 deg skew reads as exactly 12 and never
+# trips the test.
+ROT_SEARCH_DEG = tuple(float(d) for d in range(-24, 25, 3))
+
+FEATURE_NAMES = (
+    "ncc", "dx_um", "dy_um", "dtheta_deg", "pol_margin", "body_contrast",
+    "contrast_ratio", "gap_spec", "band_low_0", "band_mid_0", "band_high_0",
+    "band_low_1", "band_mid_1", "band_high_1", "band_z", "anomaly",
+)
+
+
+@dataclass
+class Measure:
+    refdes: str
+    package: str
+    ncc: float = 0.0
+    dx_um: float = 0.0
+    dy_um: float = 0.0
+    dtheta_deg: float = 0.0
+    pol_margin: float = 0.0
+    body_contrast: float = 0.0
+    contrast_ratio: float = 1.0
+    gap_spec: float = 0.0
+    bands: np.ndarray = field(default_factory=lambda: np.zeros((2, 3), np.float32))
+    band_z: float = 0.0
+    anomaly: float = 0.0
+
+    def vector(self) -> np.ndarray:
+        return np.array([self.ncc, self.dx_um, self.dy_um, self.dtheta_deg,
+                         self.pol_margin, self.body_contrast, self.contrast_ratio,
+                         self.gap_spec, *self.bands.ravel(), self.band_z,
+                         self.anomaly], np.float32)
+
+
+@dataclass
+class GoldenPackage:
+    template: np.ndarray                 # mean de-rotated diffuse crop
+    template_180: np.ndarray
+    body: np.ndarray                     # body window only -- see `body_template`
+    body_180: np.ndarray
+    body_mask: np.ndarray                # body footprint within `body`
+    band_mean: np.ndarray                # (2, 3)
+    band_std: np.ndarray
+    gap_mean: float
+    gap_std: float
+    contrast_mean: float
+    contrast_std: float
+
+
+@dataclass
+class Golden:
+    packages: dict[str, GoldenPackage] = field(default_factory=dict)
+
+    def has(self, name: str) -> bool:
+        return name in self.packages
+
+
+# ------------------------------------------------------------------ geometry
+def joint_boxes(pkg: Package) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Per-land fillet window: outer pad edge to body edge, where solder climbs."""
+    out = []
+    d = pkg.pad_pitch / 2.0
+    for sgn in (-1.0, +1.0):
+        x_outer = sgn * (d + pkg.pad_l / 2.0)
+        x_inner = sgn * pkg.body_l / 2.0
+        out.append((np.array([(x_outer + x_inner) / 2.0, 0.0]),
+                    np.array([abs(x_outer - x_inner) / 2.0, pkg.pad_w / 2.0 * 0.92])))
+    return out
+
+
+# ------------------------------------------------------------- primitive tests
+def _norm(a: np.ndarray) -> np.ndarray:
+    a = a.astype(np.float32)
+    return a / 255.0 if a.max() > 1.5 else a
+
+
+def band_fractions(region: np.ndarray, pkg: Package,
+                   shift_px: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
+    """Fraction of each fillet window lit in each angled ring -- the slope signature."""
+    out = np.zeros((2, 3), np.float32)
+    for i, (centre, half) in enumerate(joint_boxes(pkg)):
+        c = centre + np.array([shift_px[0], shift_px[1]]) * config.MM_PER_PX
+        ys, xs = roi.local_box_px(c, half, region.shape)
+        win = _norm(region[ys, xs])
+        if win.size == 0:
+            continue
+        for j, ch in enumerate(config.ANGLED_CHANNELS):
+            k = config.CHANNELS.index(ch)
+            out[i, j] = float((win[..., k] > config.BAND_THRESHOLD).mean())
+    return out
+
+
+def gap_specular(region: np.ndarray, pkg: Package) -> float:
+    """Specular response between the lands -- substrate should be dark here."""
+    ys, xs = roi.local_box_px(np.array([0.0, 0.0]), roi.gap_rect(pkg), region.shape)
+    win = _norm(region[ys, xs])
+    if win.size == 0:
+        return 0.0
+    lo = config.CHANNELS.index("low")
+    mid = config.CHANNELS.index("mid")
+    return float(np.maximum(win[..., lo], win[..., mid]).mean())
+
+
+def body_contrast(region: np.ndarray, pkg: Package) -> float:
+    """Diffuse contrast between body window and its surround -- gross presence."""
+    dif = config.CHANNELS.index("diffuse")
+    ys, xs = roi.local_box_px(np.array([0.0, 0.0]), roi.body_rect(pkg), region.shape)
+    body = _norm(region[ys, xs, dif])
+    whole = _norm(region[..., dif])
+    if body.size == 0:
+        return 0.0
+    return float(body.mean() - whole.mean())
+
+
+def _match(region_ch: np.ndarray, template: np.ndarray) -> tuple[float, float, float]:
+    """NCC of template inside region; returns (score, dx_px, dy_px)."""
+    if template.size == 0 or region_ch.shape[0] < template.shape[0] or \
+       region_ch.shape[1] < template.shape[1]:
+        return 0.0, 0.0, 0.0
+    res = cv2.matchTemplate(region_ch, template, cv2.TM_CCOEFF_NORMED)
+    _, score, _, loc = cv2.minMaxLoc(res)
+    cx = (region_ch.shape[1] - template.shape[1]) / 2.0
+    cy = (region_ch.shape[0] - template.shape[0]) / 2.0
+    return float(score), float(loc[0] - cx), float(loc[1] - cy)
+
+
+def _rotate_pair(tpl: np.ndarray, mask: np.ndarray, deg: float):
+    """Rotate a template and its mask together about their common centre."""
+    if abs(deg) < 1e-6:
+        return tpl, mask
+    h, w = tpl.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), deg, 1.0)
+    t = cv2.warpAffine(tpl, M, (w, h), flags=cv2.INTER_LINEAR,
+                       borderMode=cv2.BORDER_REFLECT101)
+    m = cv2.warpAffine(mask, M, (w, h), flags=cv2.INTER_NEAREST)
+    return np.ascontiguousarray(t), np.ascontiguousarray(m)
+
+
+def _match_masked(region: np.ndarray, tpl: np.ndarray, mask: np.ndarray) -> float:
+    if region.shape[0] < tpl.shape[0] or region.shape[1] < tpl.shape[1]:
+        return -9.0
+    r = cv2.matchTemplate(region, tpl, cv2.TM_CCORR_NORMED, mask=mask)
+    return float(np.nan_to_num(r, nan=-9.0, posinf=-9.0, neginf=-9.0).max())
+
+
+def _rotate(region: np.ndarray, deg: float) -> np.ndarray:
+    if abs(deg) < 1e-6:
+        return region
+    h, w = region.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), deg, 1.0)
+    return cv2.warpAffine(region, M, (w, h), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
+def body_mask_for(template: np.ndarray, pkg: Package) -> np.ndarray:
+    """Binary mask of the body inside a body-window template.
+
+    Skew is measured by rotating the template and correlating. Without a mask
+    the fixed lands sit inside the template too, so rotating it rotates them as
+    well and the score always argues for zero. Masking to the body compares only
+    the pixels that actually turn with the part.
+    """
+    h, w = template.shape[:2]
+    mask = np.zeros((h, w), np.float32)
+    hx = max(2, int(pkg.body_l / 2.0 / config.MM_PER_PX))
+    hy = max(2, int(pkg.body_w / 2.0 / config.MM_PER_PX))
+    cv2.rectangle(mask, (w // 2 - hx, h // 2 - hy), (w // 2 + hx, h // 2 + hy), 1.0, -1)
+    return mask
+
+
+def body_template(template: np.ndarray, pkg: Package) -> np.ndarray:
+    """Crop a golden region down to the component body.
+
+    Matching the whole footprint does not measure placement: the lands are fixed
+    to the board and never move, so they anchor the correlation peak at zero no
+    matter where the body actually sits. Only the body carries the displacement.
+    """
+    half = roi.body_rect(pkg) * 1.06
+    ys, xs = roi.local_box_px(np.array([0.0, 0.0]), half, template.shape)
+    return np.ascontiguousarray(template[ys, xs])
+
+
+# ------------------------------------------------------------------- measuring
+def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
+    pkg = comp.pkg
+    m = Measure(comp.refdes, comp.package)
+    region, _ = roi.extract_region(stack, comp, pkg)
+    dif = config.CHANNELS.index("diffuse")
+    reg_d = _norm(region[..., dif])
+
+    m.gap_spec = gap_specular(region, pkg)
+    m.body_contrast = body_contrast(region, pkg)
+
+    g = golden.packages.get(comp.package)
+    if g is None:
+        m.bands = band_fractions(region, pkg)
+        return m
+
+    # z-score, not a ratio: the golden mean passes through zero for some
+    # packages and dividing by it produces five-figure nonsense.
+    m.contrast_ratio = float((m.body_contrast - g.contrast_mean)
+                             / max(g.contrast_std, 0.01))
+
+    # placement: match the body against the un-rotated region
+    m.ncc, dx_px, dy_px = _match(reg_d, g.body)
+    m.dx_um = dx_px * config.UM_PER_PX
+    m.dy_um = dy_px * config.UM_PER_PX
+
+    # skew: rotate the masked body template; the peak angle is the negative of
+    # the part's own rotation, since turning the template the other way is what
+    # brings it into register.
+    best = (-9.0, 0.0)
+    for deg in ROT_SEARCH_DEG:
+        t, mk = _rotate_pair(g.body, g.body_mask, deg)
+        v = _match_masked(reg_d, t, mk)
+        if v > best[0]:
+            best = (v, deg)
+    m.dtheta_deg = -best[1]
+
+    if pkg.polarized:
+        s180, _, _ = _match(reg_d, g.body_180)
+        m.pol_margin = m.ncc - float(s180)
+
+    # fillet windows follow the lands, which do not move with the body
+    m.bands = band_fractions(region, pkg)
+    z = np.abs(m.bands - g.band_mean) / np.maximum(g.band_std, 1e-3)
+    m.band_z = float(z.max())
+    return m
+
+
+# ---------------------------------------------------------------------- teach
+def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
+    """Learn per-package templates and band statistics from known-good boards."""
+    acc: dict[str, dict[str, list]] = {}
+    for stack in stacks:
+        for comp in board.components:
+            pkg = comp.pkg
+            region, _ = roi.extract_region(stack, comp, pkg)
+            d = acc.setdefault(comp.package, {"tpl": [], "band": [], "gap": [], "con": []})
+            dif = config.CHANNELS.index("diffuse")
+            d["tpl"].append(_norm(region[..., dif]))
+            d["band"].append(band_fractions(region, pkg))
+            d["gap"].append(gap_specular(region, pkg))
+            d["con"].append(body_contrast(region, pkg))
+
+    packages_for = {c.package: c.pkg for c in board.components}
+    out = Golden()
+    for name, d in acc.items():
+        shp = d["tpl"][0].shape
+        tpl = np.mean([t for t in d["tpl"] if t.shape == shp], axis=0).astype(np.float32)
+        bands = np.stack(d["band"])
+        pkg_obj = packages_for[name]
+        body = body_template(tpl, pkg_obj)
+        out.packages[name] = GoldenPackage(
+            template=tpl,
+            template_180=np.ascontiguousarray(np.rot90(tpl, 2)),
+            body=body,
+            body_180=np.ascontiguousarray(np.rot90(body, 2)),
+            body_mask=body_mask_for(body, pkg_obj),
+            band_mean=bands.mean(axis=0),
+            band_std=np.maximum(bands.std(axis=0), 0.01),
+            gap_mean=float(np.mean(d["gap"])), gap_std=float(max(np.std(d["gap"]), 0.01)),
+            contrast_mean=float(np.mean(d["con"])),
+            contrast_std=float(max(np.std(d["con"]), 0.005)),
+        )
+    return out

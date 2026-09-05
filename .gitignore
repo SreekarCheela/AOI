@@ -1,0 +1,18 @@
+# virtualenvs
+.venv/
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# pipeline outputs (regenerable: cli.py demo / dataset / train / export)
+out/
+
+# real capture input (photographs are large and user-specific)
+photos/
+
+# macOS
+.DS_Store

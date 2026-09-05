@@ -1,0 +1,1283 @@
+<title>AOI Station One</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+:root{
+  --ground:#EFF1F3; --surface:#FFFFFF; --surface-2:#F6F7F9;
+  --ink:#171A1F; --ink-2:#4C555F; --ink-3:#78838F;
+  --rule:#D6DAE0; --rule-2:#E7EAEE;
+  --accent:#B0642F; --accent-soft:#F3E5D8;
+  --ch-low:#C43D3D; --ch-mid:#2F8B4C; --ch-high:#2F6FC4; --ch-diff:#7A828C;
+  --pass:#2F8B4C; --warn:#B5851F; --fail:#C43D3D;
+  --shadow:0 1px 2px rgba(20,26,34,.06), 0 8px 24px -12px rgba(20,26,34,.14);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#111419; --surface:#181C22; --surface-2:#1E232A;
+    --ink:#E6E9ED; --ink-2:#A8B1BC; --ink-3:#7C8794;
+    --rule:#2B323B; --rule-2:#232931;
+    --accent:#D9884A; --accent-soft:#33241A;
+    --ch-low:#E36565; --ch-mid:#4FB273; --ch-high:#5C9AE8; --ch-diff:#96A0AC;
+    --pass:#4FB273; --warn:#D6A73C; --fail:#E36565;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#111419; --surface:#181C22; --surface-2:#1E232A;
+  --ink:#E6E9ED; --ink-2:#A8B1BC; --ink-3:#7C8794;
+  --rule:#2B323B; --rule-2:#232931;
+  --accent:#D9884A; --accent-soft:#33241A;
+  --ch-low:#E36565; --ch-mid:#4FB273; --ch-high:#5C9AE8; --ch-diff:#96A0AC;
+  --pass:#4FB273; --warn:#D6A73C; --fail:#E36565;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"Source Serif 4",Georgia,serif; font-size:17px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:0 28px 96px}
+.col{max-width:660px}
+
+h1,h2,h3,h4,.disp{font-family:Archivo,"Helvetica Neue",Arial,sans-serif; text-wrap:balance}
+h1{font-size:clamp(38px,6vw,62px); line-height:1.02; font-weight:700; letter-spacing:-.025em; margin:0}
+h2{font-size:clamp(25px,3vw,32px); line-height:1.12; font-weight:700; letter-spacing:-.017em; margin:0 0 4px}
+h3{font-size:19px; line-height:1.28; font-weight:600; letter-spacing:-.008em; margin:34px 0 8px}
+h4{font-size:15px; font-weight:600; margin:24px 0 6px; letter-spacing:-.003em}
+p{margin:0 0 17px}
+a{color:var(--accent)}
+strong{font-weight:600}
+.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace; font-size:11.5px; font-weight:500;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--accent); margin:0 0 10px;
+}
+.lede{font-size:20px; line-height:1.5; color:var(--ink-2)}
+.note{font-size:14.5px; line-height:1.55; color:var(--ink-2)}
+
+/* ---- masthead ---- */
+header.mast{border-bottom:1px solid var(--rule); background:var(--surface); margin-bottom:44px}
+.mast-inner{max-width:1080px; margin:0 auto; padding:56px 28px 40px}
+.kicker{
+  font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--ink-3); display:flex; gap:14px; flex-wrap:wrap; margin-bottom:26px;
+}
+.kicker span:not(:last-child):after{content:"／"; margin-left:14px; color:var(--rule)}
+.mast h1{margin-bottom:18px}
+.mast .lede{max-width:640px}
+
+/* ---- spec strip ---- */
+.strip{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+  border:1px solid var(--rule); border-radius:3px; background:var(--surface-2);
+  margin:34px 0 0; overflow:hidden;
+}
+.strip div{padding:14px 16px; border-right:1px solid var(--rule)}
+.strip div:last-child{border-right:0}
+.strip dt{
+  font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-3); margin-bottom:5px;
+}
+.strip dd{
+  margin:0; font-family:Archivo,sans-serif; font-size:19px; font-weight:600;
+  letter-spacing:-.015em; font-variant-numeric:tabular-nums;
+}
+.strip dd small{font-size:12.5px; font-weight:500; color:var(--ink-2); letter-spacing:0}
+
+/* ---- sections ---- */
+section{margin:0 0 56px; scroll-margin-top:20px}
+.sec-head{border-top:2px solid var(--ink); padding-top:14px; margin-bottom:22px}
+
+/* ---- panels ---- */
+.panel{
+  background:var(--surface); border:1px solid var(--rule); border-radius:3px;
+  padding:22px 24px; margin:24px 0; box-shadow:var(--shadow);
+}
+.panel > :last-child{margin-bottom:0}
+.callout{
+  border-left:3px solid var(--accent); background:var(--accent-soft);
+  padding:16px 20px; margin:24px 0; border-radius:0 3px 3px 0; font-size:16px;
+}
+.callout > :last-child{margin-bottom:0}
+.callout .eyebrow{margin-bottom:6px}
+
+/* ---- tables ---- */
+.tbl-scroll{overflow-x:auto; margin:22px 0; border:1px solid var(--rule); border-radius:3px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:14.5px; font-family:Archivo,sans-serif}
+caption{
+  caption-side:top; text-align:left; padding:13px 16px 12px; border-bottom:1px solid var(--rule);
+  font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.11em;
+  text-transform:uppercase; color:var(--ink-3); background:var(--surface-2);
+}
+th,td{padding:9px 14px; text-align:left; border-bottom:1px solid var(--rule-2); vertical-align:top}
+thead th{
+  font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-2);
+  font-weight:600; border-bottom:1px solid var(--rule); white-space:nowrap;
+}
+tbody tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right; font-variant-numeric:tabular-nums; font-family:"IBM Plex Mono",monospace; font-size:13.5px; white-space:nowrap}
+tr.total td{border-top:2px solid var(--ink); font-weight:700; background:var(--surface-2)}
+tr.sub td{background:var(--surface-2); font-weight:600; font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-2)}
+td .pn{font-family:"IBM Plex Mono",monospace; font-size:12.5px; color:var(--ink-2); display:block; margin-top:2px}
+
+.tag{
+  display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10.5px; font-weight:500;
+  letter-spacing:.05em; padding:2px 7px; border-radius:2px; border:1px solid currentColor; white-space:nowrap;
+}
+.t-low{color:var(--ch-low)} .t-mid{color:var(--ch-mid)} .t-high{color:var(--ch-high)} .t-diff{color:var(--ch-diff)}
+.t-pass{color:var(--pass)} .t-warn{color:var(--warn)} .t-fail{color:var(--fail)}
+
+/* ---- figures ---- */
+figure{margin:30px 0; background:var(--surface); border:1px solid var(--rule); border-radius:3px; padding:22px 24px 4px; box-shadow:var(--shadow)}
+figure svg{display:block; width:100%; max-width:100%; height:auto; color:var(--ink)}
+figcaption{
+  font-size:13.5px; line-height:1.5; color:var(--ink-2); padding:14px 0 18px;
+  border-top:1px solid var(--rule-2); margin-top:16px;
+}
+figcaption b{color:var(--ink); font-weight:600}
+
+/* ---- phase list ---- */
+ol.phases{list-style:none; counter-reset:ph; padding:0; margin:24px 0}
+ol.phases li{
+  counter-increment:ph; position:relative; padding:0 0 22px 60px;
+  border-left:1px solid var(--rule); margin-left:15px;
+}
+ol.phases li:last-child{border-left-color:transparent; padding-bottom:0}
+ol.phases li:before{
+  content:"P" counter(ph); position:absolute; left:-15px; top:0;
+  width:30px; height:30px; border-radius:50%; background:var(--surface); border:1px solid var(--rule);
+  display:grid; place-items:center; font-family:"IBM Plex Mono",monospace; font-size:11px;
+  font-weight:600; color:var(--accent);
+}
+ol.phases h4{margin:3px 0 4px; font-size:16.5px}
+ol.phases .dur{
+  font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--ink-3); margin-bottom:6px;
+}
+ol.phases p{font-size:15.5px; margin-bottom:8px}
+ol.phases .exit{font-size:14px; color:var(--ink-2); border-top:1px dotted var(--rule); padding-top:7px}
+ol.phases .exit b{font-family:Archivo,sans-serif; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3)}
+
+ul.tight{padding-left:20px; margin:0 0 17px}
+ul.tight li{margin-bottom:7px}
+
+footer{border-top:1px solid var(--rule); padding-top:22px; margin-top:12px; color:var(--ink-3); font-size:13.5px}
+
+@media (max-width:640px){
+  body{font-size:16px}
+  .wrap{padding:0 18px 64px}
+  .mast-inner{padding:36px 18px 30px}
+  .strip div{border-right:0; border-bottom:1px solid var(--rule)}
+  figure{padding:16px 14px 2px}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+</style>
+
+<header class="mast">
+  <div class="mast-inner">
+    <div class="kicker"><span>Design specification</span><span>Rev A</span><span>Post-reflow inspection</span></div>
+    <h1>AOI Station One</h1>
+    <p class="lede">An offline benchtop optical inspection cell for post-reflow SMT boards up to 150&nbsp;mm, built in-house. Resolves 0402 passives, reads polarity, and grades solder fillets in 2D using angle-encoded illumination.</p>
+    <dl class="strip">
+      <div><dt>Sampling</dt><dd>12 <small>µm/px</small></dd></div>
+      <div><dt>Tile FOV</dt><dd>49 × 36 <small>mm</small></dd></div>
+      <div><dt>Scan time</dt><dd>5.8 <small>s / 150mm²</small></dd></div>
+      <div><dt>Light channels</dt><dd>4 <small>sequential</small></dd></div>
+      <div><dt>Hardware</dt><dd>≈$7.9k <small>ex-works</small></dd></div>
+    </dl>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ============ 1 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§1 · Design driver</p>
+    <h2>One requirement sets the whole architecture</h2>
+  </div>
+  <div class="col">
+    <p>Three of your four defect classes — missing parts, wrong position, polarity — are solved by ordinary 2D template comparison. Any camera and any even light will find them. They are not what shapes this machine.</p>
+    <p>The fourth one is. <strong>Fillet quality, tombstoning and skew are height problems being solved with a flat picture.</strong> A camera cannot measure solder volume, so the machine has to recover surface <em>slope</em> instead — and the only way to do that without a 3D sensor is to control the angle the light arrives from.</p>
+    <p>Molten-then-frozen solder is specular: it behaves like a curved mirror, not a diffuse surface. A mirrored surface tilted at angle <span class="mono">α</span> from horizontal reflects light into a vertically-mounted camera only when that light arrives at elevation <span class="mono">θ = 90° − 2α</span>. Turn that around and it becomes a measuring instrument:</p>
+  </div>
+
+  <div class="tbl-scroll col">
+    <table>
+      <caption>Illumination elevation → surface slope it reveals</caption>
+      <thead><tr><th>Channel</th><th class="num">Elevation θ</th><th class="num">Slope α seen</th><th>What that is on a joint</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tag t-high">HIGH</span></td><td class="num">72°</td><td class="num">9°</td><td>Bare pad, board surface, component top</td></tr>
+        <tr><td><span class="tag t-mid">MID</span></td><td class="num">45°</td><td class="num">22.5°</td><td>Mid-slope of the fillet sweep</td></tr>
+        <tr><td><span class="tag t-low">LOW</span></td><td class="num">20°</td><td class="num">35°</td><td>Steep face where solder climbs the termination</td></tr>
+        <tr><td><span class="tag t-diff">DIFFUSE</span></td><td class="num">dome</td><td class="num">all</td><td>Flat, shadowless — for body markings and OCR</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 840 430" role="img" aria-label="Cross-section showing three LED ring elevations reflecting off different slopes of a solder fillet into an overhead camera, and the resulting three-band signature for a correct fillet versus an insufficient one and an open joint.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+        </marker>
+        <marker id="arL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--ch-low)"/>
+        </marker>
+        <marker id="arM" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--ch-mid)"/>
+        </marker>
+        <marker id="arH" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--ch-high)"/>
+        </marker>
+      </defs>
+
+      <!-- ============ PANEL A ============ -->
+      <text x="20" y="20" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="currentColor" opacity=".55">A · RAY GEOMETRY</text>
+
+      <!-- camera -->
+      <rect x="176" y="40" width="52" height="34" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <rect x="192" y="74" width="20" height="12" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="238" y="61" font-family="IBM Plex Mono,monospace" font-size="11" fill="currentColor">camera</text>
+      <text x="238" y="75" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">telecentric-ish, vertical</text>
+
+      <!-- dome arc -->
+      <path d="M32,352 A170,170 0 0 1 372,352" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 4" opacity=".4"/>
+      <text x="46" y="176" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".5">diffuse dome</text>
+
+      <!-- LED rings, left (emitting) -->
+      <circle cx="40" cy="294" r="7" fill="var(--ch-low)"/>
+      <circle cx="80" cy="232" r="7" fill="var(--ch-mid)"/>
+      <circle cx="147" cy="190" r="7" fill="var(--ch-high)"/>
+      <!-- LED rings, right (same ring, other side of section) -->
+      <circle cx="364" cy="294" r="7" fill="var(--ch-low)" opacity=".28"/>
+      <circle cx="324" cy="232" r="7" fill="var(--ch-mid)" opacity=".28"/>
+      <circle cx="257" cy="190" r="7" fill="var(--ch-high)" opacity=".28"/>
+
+      <text x="14" y="316" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--ch-low)">20°</text>
+      <text x="54" y="254" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--ch-mid)">45°</text>
+      <text x="121" y="212" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--ch-high)">72°</text>
+
+      <!-- board -->
+      <rect x="20" y="352" width="380" height="26" fill="currentColor" opacity=".08"/>
+      <line x1="20" y1="352" x2="400" y2="352" stroke="currentColor" stroke-width="1.2"/>
+      <text x="26" y="371" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">PCB substrate</text>
+      <!-- pad -->
+      <rect x="112" y="345" width="140" height="7" fill="var(--accent)"/>
+      <text x="112" y="336" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--accent)">Cu pad</text>
+      <!-- component body -->
+      <rect x="250" y="308" width="120" height="37" fill="currentColor" opacity=".55"/>
+      <rect x="250" y="308" width="14" height="37" fill="currentColor" opacity=".8"/>
+      <text x="278" y="332" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--surface)">0402 body</text>
+      <!-- fillet -->
+      <path d="M118,345 Q206,341 252,312 L252,345 Z" fill="var(--accent)" opacity=".38"/>
+      <path d="M118,345 Q206,341 252,312" fill="none" stroke="var(--accent)" stroke-width="1.8"/>
+
+      <!-- incident rays + reflected verticals -->
+      <line x1="147" y1="197" x2="150" y2="338" stroke="var(--ch-high)" stroke-width="1.5" marker-end="url(#arH)"/>
+      <line x1="150" y1="338" x2="150" y2="92" stroke="var(--ch-high)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>
+      <circle cx="150" cy="340" r="3" fill="var(--ch-high)"/>
+
+      <line x1="86" y1="238" x2="200" y2="336" stroke="var(--ch-mid)" stroke-width="1.5" marker-end="url(#arM)"/>
+      <line x1="202" y1="337" x2="202" y2="92" stroke="var(--ch-mid)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>
+      <circle cx="202" cy="338" r="3" fill="var(--ch-mid)"/>
+
+      <line x1="47" y1="297" x2="236" y2="322" stroke="var(--ch-low)" stroke-width="1.5" marker-end="url(#arL)"/>
+      <line x1="238" y1="323" x2="238" y2="92" stroke="var(--ch-low)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>
+      <circle cx="238" cy="324" r="3" fill="var(--ch-low)"/>
+
+      <text x="150" y="402" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--ch-high)">α≈9°</text>
+      <text x="202" y="402" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--ch-mid)">α≈22°</text>
+      <text x="246" y="402" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--ch-low)">α≈35°</text>
+      <line x1="118" y1="390" x2="252" y2="390" stroke="currentColor" stroke-width=".8" opacity=".35"/>
+      <text x="20" y="422" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">slope rises from toe → termination</text>
+
+      <!-- divider -->
+      <line x1="440" y1="14" x2="440" y2="416" stroke="currentColor" stroke-width="1" opacity=".18"/>
+
+      <!-- ============ PANEL B ============ -->
+      <text x="472" y="20" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="currentColor" opacity=".55">B · WHAT EACH JOINT LOOKS LIKE</text>
+
+      <!-- B1 correct -->
+      <text x="472" y="52" font-family="Archivo,sans-serif" font-size="13" font-weight="600" fill="currentColor">Correct fillet</text>
+      <text x="472" y="68" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--pass)">HIGH → MID → LOW banding present</text>
+      <rect x="472" y="112" width="150" height="7" fill="var(--accent)" opacity=".7"/>
+      <rect x="596" y="76" width="80" height="36" fill="currentColor" opacity=".55"/>
+      <path d="M478,112 Q548,108 596,80 L596,112 Z" fill="var(--accent)" opacity=".3"/>
+      <line x1="478" y1="106" x2="524" y2="105" stroke="var(--ch-high)" stroke-width="5"/>
+      <line x1="524" y1="105" x2="566" y2="97" stroke="var(--ch-mid)" stroke-width="5"/>
+      <line x1="566" y1="97" x2="596" y2="80" stroke="var(--ch-low)" stroke-width="5"/>
+      <line x1="700" y1="76" x2="700" y2="119" stroke="var(--pass)" stroke-width="3"/>
+      <text x="712" y="94" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--pass)">PASS</text>
+      <text x="712" y="109" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".55">3 bands, ordered</text>
+
+      <!-- B2 insufficient -->
+      <text x="472" y="176" font-family="Archivo,sans-serif" font-size="13" font-weight="600" fill="currentColor">Insufficient solder</text>
+      <text x="472" y="192" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--fail)">LOW band thin or absent</text>
+      <rect x="472" y="236" width="150" height="7" fill="var(--accent)" opacity=".7"/>
+      <rect x="596" y="200" width="80" height="36" fill="currentColor" opacity=".55"/>
+      <path d="M478,236 Q556,234 596,224 L596,236 Z" fill="var(--accent)" opacity=".3"/>
+      <line x1="478" y1="230" x2="556" y2="229" stroke="var(--ch-high)" stroke-width="5"/>
+      <line x1="556" y1="229" x2="594" y2="223" stroke="var(--ch-mid)" stroke-width="5"/>
+      <line x1="700" y1="200" x2="700" y2="243" stroke="var(--fail)" stroke-width="3"/>
+      <text x="712" y="218" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--fail)">FAIL</text>
+      <text x="712" y="233" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".55">no steep face</text>
+
+      <!-- B3 open/tombstone -->
+      <text x="472" y="300" font-family="Archivo,sans-serif" font-size="13" font-weight="600" fill="currentColor">Open joint / tombstone</text>
+      <text x="472" y="316" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--fail)">flat HIGH only, body gone from window</text>
+      <rect x="472" y="360" width="150" height="7" fill="var(--accent)" opacity=".7"/>
+      <rect x="596" y="286" width="26" height="74" fill="currentColor" opacity=".55"/>
+      <line x1="478" y1="354" x2="592" y2="354" stroke="var(--ch-high)" stroke-width="5"/>
+      <line x1="700" y1="324" x2="700" y2="367" stroke="var(--fail)" stroke-width="3"/>
+      <text x="712" y="342" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--fail)">FAIL</text>
+      <text x="712" y="357" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".55">bare pad exposed</text>
+
+      <text x="472" y="410" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">Bands are measured per-pad as pixel-fraction</text>
+      <text x="472" y="424" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">per channel, not read visually.</text>
+    </svg>
+    <figcaption><b>Angle-encoded illumination turns a 2D camera into a slope sensor.</b> Each LED ring is switched on alone and captured as its own full-resolution frame, so every pixel carries three independent slope measurements. A correct fillet produces an ordered high→mid→low band sweep from the pad toe up to the termination; an insufficient joint never develops the steep face, so the low-angle band collapses. This is the mechanism the tombstone and fillet requirements rest on.</figcaption>
+  </figure>
+
+  <div class="callout col">
+    <p class="eyebrow">Consequence</p>
+    <p>Because slope is inferred from <em>which light was on</em>, illumination geometry and uniformity are now metrology, not lighting. Every downstream number in this document — sensor, aperture, cycle time — is downstream of that decision.</p>
+  </div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§2 · Optics</p>
+    <h2>Sensor, sampling, and why the board is scanned in tiles</h2>
+  </div>
+  <div class="col">
+    <p>Detecting a 0402 needs roughly 20 px across its 0.5 mm width; grading its fillet needs closer to 40. Setting the sampling pitch at <strong>12 µm/px</strong> gives a 0402 body 83 × 42 px and each termination about 20 px of fillet to work with — and, usefully, it also puts a 0201 at 50 × 25 px, so the optics do not need replacing if your product mix shrinks.</p>
+    <p>A single-shot camera covering all of 150 × 150 mm at that pitch would need 156 MP. That camera costs more than the rest of the machine. The alternative is to keep a modest sensor and move it: a <span class="mono">4096 × 3000</span> sensor at 12 µm/px sees 49 × 36 mm per exposure, so a full board is covered by <strong>20 tiles in a 4 × 5 raster</strong> — about 5.8 seconds of scanning. On an offline station with a human loading boards, that time is free.</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 840 340" role="img" aria-label="Left: optical stack showing camera, 75mm lens, extension tube, illumination dome and board at 336mm working distance. Right: the 150 by 150 millimetre board covered by a 4 by 5 grid of 49 by 36 millimetre tiles with 10 percent overlap.">
+      <defs>
+        <marker id="dim" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M2,2 L8,5 L2,8 z" fill="currentColor"/>
+        </marker>
+      </defs>
+
+      <text x="20" y="20" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="currentColor" opacity=".55">A · OPTICAL STACK</text>
+
+      <!-- camera body -->
+      <rect x="112" y="44" width="76" height="46" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="200" y="62" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="currentColor">IMX304 mono</text>
+      <text x="200" y="76" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">4096×3000 · 3.45µm</text>
+      <!-- extension tube -->
+      <rect x="134" y="90" width="32" height="20" fill="currentColor" opacity=".25"/>
+      <text x="200" y="105" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--accent)">+21.6mm extension</text>
+      <!-- lens -->
+      <rect x="128" y="110" width="44" height="42" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="200" y="136" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="currentColor">75mm f/5.6</text>
+
+      <!-- cone -->
+      <path d="M136,152 L64,268 M164,152 L236,268" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" opacity=".5"/>
+
+      <!-- dome -->
+      <path d="M56,268 A94,94 0 0 1 244,268" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".55"/>
+      <circle cx="60" cy="252" r="4" fill="var(--ch-low)"/><circle cx="240" cy="252" r="4" fill="var(--ch-low)"/>
+      <circle cx="80" cy="216" r="4" fill="var(--ch-mid)"/><circle cx="220" cy="216" r="4" fill="var(--ch-mid)"/>
+      <circle cx="116" cy="190" r="4" fill="var(--ch-high)"/><circle cx="184" cy="190" r="4" fill="var(--ch-high)"/>
+      <text x="256" y="228" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="currentColor">4-channel dome</text>
+      <text x="256" y="242" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">strobed, 8ms each</text>
+
+      <!-- board + vacuum -->
+      <rect x="34" y="268" width="232" height="10" fill="currentColor" opacity=".18"/>
+      <rect x="34" y="278" width="232" height="16" fill="currentColor" opacity=".08" stroke="currentColor" stroke-width="1"/>
+      <text x="42" y="290" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">vacuum platen — flattens warp</text>
+      <line x1="70" y1="294" x2="70" y2="306" stroke="currentColor" stroke-width="1" opacity=".5"/>
+      <line x1="150" y1="294" x2="150" y2="306" stroke="currentColor" stroke-width="1" opacity=".5"/>
+      <line x1="230" y1="294" x2="230" y2="306" stroke="currentColor" stroke-width="1" opacity=".5"/>
+
+      <!-- WD dimension -->
+      <line x1="300" y1="152" x2="300" y2="268" stroke="currentColor" stroke-width="1" marker-start="url(#dim)" marker-end="url(#dim)" opacity=".7"/>
+      <text x="310" y="206" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="currentColor">WD 336mm</text>
+      <text x="310" y="220" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".55">corner ray only 5.2°</text>
+
+      <!-- DOF -->
+      <rect x="34" y="262" width="232" height="12" fill="var(--accent)" opacity=".2"/>
+      <text x="42" y="322" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">DOF ±0.60mm at f/5.6 (shaded)</text>
+
+      <line x1="400" y1="14" x2="400" y2="326" stroke="currentColor" stroke-width="1" opacity=".18"/>
+
+      <!-- PANEL B: tiling -->
+      <text x="432" y="20" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="currentColor" opacity=".55">B · 4 × 5 TILE RASTER</text>
+
+      <rect x="440" y="44" width="248" height="248" fill="currentColor" opacity=".05" stroke="currentColor" stroke-width="1.2"/>
+      <text x="440" y="308" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".6">150 × 150 mm board</text>
+
+      <!-- fiducials -->
+      <circle cx="456" cy="60" r="4" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+      <circle cx="672" cy="276" r="4" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+      <circle cx="672" cy="60" r="4" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="600" y="36" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">3 fiducials</text>
+
+      <!-- tiles 4 cols x 5 rows, with overlap shown -->
+      <g fill="none" stroke="var(--ch-high)" stroke-width="1.1" opacity=".85">
+        <rect x="440" y="44" width="73" height="53"/>
+        <rect x="506" y="44" width="73" height="53"/>
+        <rect x="572" y="44" width="73" height="53"/>
+        <rect x="615" y="44" width="73" height="53"/>
+      </g>
+      <g fill="none" stroke="currentColor" stroke-width=".9" opacity=".3">
+        <rect x="440" y="92" width="73" height="53"/><rect x="506" y="92" width="73" height="53"/>
+        <rect x="572" y="92" width="73" height="53"/><rect x="615" y="92" width="73" height="53"/>
+        <rect x="440" y="140" width="73" height="53"/><rect x="506" y="140" width="73" height="53"/>
+        <rect x="572" y="140" width="73" height="53"/><rect x="615" y="140" width="73" height="53"/>
+        <rect x="440" y="188" width="73" height="53"/><rect x="506" y="188" width="73" height="53"/>
+        <rect x="572" y="188" width="73" height="53"/><rect x="615" y="188" width="73" height="53"/>
+        <rect x="440" y="239" width="73" height="53"/><rect x="506" y="239" width="73" height="53"/>
+        <rect x="572" y="239" width="73" height="53"/><rect x="615" y="239" width="73" height="53"/>
+      </g>
+      <rect x="506" y="44" width="7" height="53" fill="var(--ch-high)" opacity=".3"/>
+      <text x="704" y="66" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--ch-high)">49 × 36mm</text>
+      <text x="704" y="80" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">per tile</text>
+      <text x="704" y="104" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">10% overlap</text>
+      <text x="704" y="118" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">absorbs stage</text>
+      <text x="704" y="132" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".55">error</text>
+      <text x="704" y="252" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">20 tiles</text>
+      <text x="704" y="266" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">× 4 channels</text>
+      <text x="704" y="280" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--accent)">= 80 frames</text>
+    </svg>
+    <figcaption><b>The head moves; the board never does.</b> Camera, lens and dome travel together as one rigid optical assembly over a board clamped to a fixed vacuum platen, so board position cannot drift mid-scan. Tiles overlap 10%, which is what lets a cheap stage be good enough — see §4.</figcaption>
+  </figure>
+
+  <h3>Focal length: buying working distance to buy away parallax</h3>
+  <div class="col">
+    <p>A non-telecentric lens sees tall components from an angle, so a 1 mm-tall part near the tile corner appears displaced from where it really sits. That error lands directly in your placement-offset measurement, so it matters. Lengthening the lens pushes the camera further back and flattens the cone:</p>
+  </div>
+  <div class="tbl-scroll col">
+    <table>
+      <caption>Focal length trade at 0.2875× magnification</caption>
+      <thead><tr><th>Lens</th><th class="num">Working dist.</th><th class="num">Corner ray</th><th class="num">Parallax, 1mm part</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>35 mm</td><td class="num">157 mm</td><td class="num">11.0°</td><td class="num">194 µm · 16 px</td><td><span class="tag t-fail">too much</span></td></tr>
+        <tr><td>50 mm</td><td class="num">224 mm</td><td class="num">7.8°</td><td class="num">136 µm · 11 px</td><td></td></tr>
+        <tr><td><strong>75 mm</strong></td><td class="num">336 mm</td><td class="num">5.2°</td><td class="num">91 µm · 7.6 px</td><td><span class="tag t-pass">selected</span></td></tr>
+        <tr><td>100 mm</td><td class="num">448 mm</td><td class="num">3.9°</td><td class="num">68 µm · 5.7 px</td><td><span class="tag t-warn">tall column</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>75 mm is the balance point. The residual 7.6 px is not left uncorrected: package height is already known from the component library, so the pipeline applies a per-component parallax shift from the tile centre before measuring offset. That software correction is what lets you skip a telecentric lens and its ~$1,500 premium.</p>
+  </div>
+
+  <h3>Aperture: the point where sharpness stops improving</h3>
+  <div class="col">
+    <p>Stopping down buys depth of field until diffraction erases the detail you stopped down to get. At 12 µm sampling the two curves cross cleanly:</p>
+  </div>
+  <div class="tbl-scroll col">
+    <table>
+      <caption>Depth of field vs. diffraction, 75 mm lens</caption>
+      <thead><tr><th>f-number</th><th class="num">Total DOF</th><th class="num">Airy disc</th><th class="num">Airy in px</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>f/2.8</td><td class="num">0.60 mm</td><td class="num">4.8 µm</td><td class="num">0.4</td><td><span class="tag t-warn">too shallow</span></td></tr>
+        <tr><td>f/4</td><td class="num">0.86 mm</td><td class="num">6.9 µm</td><td class="num">0.6</td><td></td></tr>
+        <tr><td><strong>f/5.6</strong></td><td class="num">1.20 mm</td><td class="num">9.7 µm</td><td class="num">0.8</td><td><span class="tag t-pass">selected</span></td></tr>
+        <tr><td>f/8</td><td class="num">1.72 mm</td><td class="num">13.8 µm</td><td class="num">1.2</td><td><span class="tag t-warn">softening</span></td></tr>
+        <tr><td>f/11</td><td class="num">2.37 mm</td><td class="num">19.0 µm</td><td class="num">1.6</td><td><span class="tag t-fail">diffraction-limited</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>f/5.6 gives <strong>±0.60 mm</strong> of focus latitude with the optical blur still smaller than one pixel. Focus the plane roughly 0.5 mm above the board and everything from the bare pad up to a 1.1 mm-tall part stays sharp. Taller parts — electrolytics, connectors, crystals — go soft in the <em>body</em>, but their solder joints sit on the board plane and stay sharp, so joint grading is unaffected. Only body-marking OCR on tall parts degrades, and that is a small enough set to handle with a second pass at a different focus if it ever matters.</p>
+  </div>
+  <div class="callout col">
+    <p class="eyebrow">Design constraint this creates</p>
+    <p>±0.60 mm is less than the warp a free 150 mm board can have. <strong>Vacuum hold-down is not an accessory here, it is what makes the optics work.</strong> Budget for a machined platen with a proper vacuum grid rather than a printed part with a few holes.</p>
+  </div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§3 · Illumination</p>
+    <h2>Monochrome sensor, four sequential channels</h2>
+  </div>
+  <div class="col">
+    <p>Commercial AOI conventionally fires red, green and blue rings simultaneously into a colour camera, letting the Bayer filter separate the angles in one shot. It is fast, and it is the wrong trade for an offline station where you have seconds to spare.</p>
+    <p>Use a <strong>monochrome sensor and switch one ring at a time</strong>, capturing four frames per tile. It costs about 32 ms extra per tile and buys four things:</p>
+    <ul class="tight">
+      <li><strong>True full resolution per channel.</strong> A Bayer sensor interpolates — the red channel is really one pixel in four, upsampled. Sequential mono gives every channel all 12 MP, genuinely resolved.</li>
+      <li><strong>Roughly 3× the sensitivity</strong>, since no colour filter array is throwing away light. Shorter exposures, less motion sensitivity.</li>
+      <li><strong>No cross-talk.</strong> A red LED's tail leaks into the green Bayer pixel; separate exposures cannot leak into each other at all. This matters because the fillet grading is a ratio between channels — cross-talk is a direct measurement error.</li>
+      <li><strong>Channels are no longer limited to three.</strong> The fourth is a flat diffuse dome frame for body markings and OCR, which the RGB scheme has no room for. A fifth coaxial channel can be added later for specular defects without redesigning anything.</li>
+    </ul>
+    <p>The LEDs can then all be the same white or the same wavelength, chosen for sensor QE rather than for being separable — which also removes chromatic focus shift between channels, a nuisance the RGB approach has to live with.</p>
+  </div>
+
+  <h3>Strobe, not continuous</h3>
+  <div class="col">
+    <p>Drive each ring as a pulse of under a millisecond, overdriven several times past its continuous rating. Peak illumination goes up sharply while average power and LED junction temperature stay low, which matters because <strong>LED output drifts with temperature and drift shows up as a slow change in your fillet thresholds.</strong> A machine that passes boards in the morning and fails them in the afternoon is a lighting thermal problem nine times out of ten.</p>
+    <p>Trigger the strobe from the camera's hardware strobe output, not from software. A microcontroller listens to the camera and switches the appropriate MOSFET; software only selects which channel is armed next. Software-timed lighting will eventually mis-pair a frame with the wrong channel under load, and that failure is maddening to diagnose.</p>
+  </div>
+  <div class="callout col">
+    <p class="eyebrow">Buy this one, don't build it</p>
+    <p>A DIY dome is tempting and the parts cost under $250. Skip it for the first unit. <strong>Illumination non-uniformity is the single largest source of false calls</strong>, and a hand-built dome makes uniformity a variable you will be debugging for months, entangled with every algorithm you write. Buy a commercial multi-angle ring or dome with a documented uniformity spec, get the machine working, then build your own once you have a reference to measure against.</p>
+  </div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§4 · Mechanics</p>
+    <h2>Where precision is worth paying for, and where it isn't</h2>
+  </div>
+  <div class="col">
+    <p>The instinct on a vision machine is to buy the most repeatable stage affordable. Resist it. Every tile is aligned in software against board features before anything is measured, so <strong>stage positioning error is corrected, not accumulated.</strong> What the stage actually has to deliver is far more modest:</p>
+  </div>
+  <div class="tbl-scroll col">
+    <table>
+      <caption>Mechanical requirement budget</caption>
+      <thead><tr><th>Axis of concern</th><th>Requirement</th><th>Why that number</th></tr></thead>
+      <tbody>
+        <tr><td>XY repeatability</td><td class="mono">±100 µm</td><td>Absorbed entirely by the 10% tile overlap plus per-component search window. A belt-driven stage clears this.</td></tr>
+        <tr><td>XY settle time</td><td class="mono">&lt;200 ms to &lt;12 µm</td><td>Residual vibration must fall below one pixel before exposure. This, not travel speed, sets cycle time.</td></tr>
+        <tr><td>Z focus stability</td><td class="mono">±150 µm</td><td>Must stay well inside the ±600 µm depth of field across all travel. Drives frame stiffness.</td></tr>
+        <tr><td>Optical axis squareness</td><td class="mono">±0.2°</td><td>Tilt shifts the effective illumination elevation and corrupts slope inference. This one is genuinely tight.</td></tr>
+        <tr><td>Board flatness on platen</td><td class="mono">&lt;200 µm</td><td>Vacuum-flattened. The hardest real constraint in the machine.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>Note where the tight tolerances landed: not on the stage, but on <strong>frame stiffness and optical squareness</strong>. Spend money on a rigid gantry and a properly machined platen; buy an ordinary linear-rail stage. This inverts the usual budget and saves roughly $1,500.</p>
+    <p>Two other things are not optional. The enclosure must be <strong>genuinely light-tight with a matte black interior</strong> — ambient light varies with the time of day and with whether someone opened a roller shutter, and it will walk your thresholds. And the fixture area must be <strong>ESD-safe</strong>: dissipative platen surface, bonded frame, wrist-strap point at the load position. An inspection station that damages boards is worse than no station.</p>
+  </div>
+</section>
+
+<!-- ============ 5 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§5 · Software</p>
+    <h2>The pipeline, and the loop that makes it improve</h2>
+  </div>
+  <div class="col">
+    <p>Inspection programs are not written per board — they are generated from data the SMT line already produces. The pick-and-place centroid file gives every reference designator its X, Y, rotation and side; the BOM maps designator to part number and package; a package library maps package to body dimensions, termination geometry and polarity-marking type. From those three, the ROI list writes itself.</p>
+    <p>Teaching is then a matter of scanning a handful of known-good boards and recording, per component, what "correct" looks like across all four channels. Runtime compares against that. The part that separates a machine people trust from one they ignore is the fourth stage:</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 840 400" role="img" aria-label="Pipeline diagram: CAD centroid, BOM and package library feed program generation, which feeds golden board teaching, which feeds runtime inspection. Runtime failures go to an operator review screen whose verdicts loop back to both retrain the classifiers and retune the golden model.">
+      <defs>
+        <marker id="p1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+        </marker>
+        <marker id="p2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--accent)"/>
+        </marker>
+      </defs>
+
+      <!-- inputs -->
+      <g font-family="IBM Plex Mono,monospace" font-size="10.5">
+        <rect x="16" y="36" width="128" height="34" rx="2" fill="none" stroke="currentColor" stroke-width="1" opacity=".7"/>
+        <text x="80" y="57" text-anchor="middle" fill="currentColor">centroid / P&amp;P</text>
+        <rect x="16" y="82" width="128" height="34" rx="2" fill="none" stroke="currentColor" stroke-width="1" opacity=".7"/>
+        <text x="80" y="103" text-anchor="middle" fill="currentColor">BOM</text>
+        <rect x="16" y="128" width="128" height="34" rx="2" fill="none" stroke="currentColor" stroke-width="1" opacity=".7"/>
+        <text x="80" y="149" text-anchor="middle" fill="currentColor">package library</text>
+      </g>
+      <text x="16" y="24" font-family="IBM Plex Mono,monospace" font-size="10" letter-spacing="1" fill="currentColor" opacity=".5">EXISTING LINE DATA</text>
+
+      <line x1="144" y1="53" x2="196" y2="88" stroke="currentColor" stroke-width="1.2" marker-end="url(#p1)"/>
+      <line x1="144" y1="99" x2="196" y2="99" stroke="currentColor" stroke-width="1.2" marker-end="url(#p1)"/>
+      <line x1="144" y1="145" x2="196" y2="110" stroke="currentColor" stroke-width="1.2" marker-end="url(#p1)"/>
+
+      <!-- stage 1 -->
+      <rect x="200" y="64" width="132" height="70" rx="3" fill="currentColor" opacity=".06"/>
+      <rect x="200" y="64" width="132" height="70" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="266" y="90" text-anchor="middle" font-family="Archivo,sans-serif" font-size="13" font-weight="600" fill="currentColor">Program gen</text>
+      <text x="266" y="107" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".65">body + pad ROIs</text>
+      <text x="266" y="121" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".65">per RefDes</text>
+
+      <line x1="332" y1="99" x2="392" y2="99" stroke="currentColor" stroke-width="1.2" marker-end="url(#p1)"/>
+      <text x="362" y="92" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9" fill="currentColor" opacity=".6">ROIs</text>
+
+      <!-- stage 2 -->
+      <rect x="396" y="64" width="132" height="70" rx="3" fill="currentColor" opacity=".06"/>
+      <rect x="396" y="64" width="132" height="70" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="462" y="90" text-anchor="middle" font-family="Archivo,sans-serif" font-size="13" font-weight="600" fill="currentColor">Teach</text>
+      <text x="462" y="107" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".65">5–20 golden boards</text>
+      <text x="462" y="121" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".65">per-ROI statistics</text>
+
+      <line x1="462" y1="134" x2="462" y2="180" stroke="currentColor" stroke-width="1.2" marker-end="url(#p1)"/>
+      <text x="472" y="160" font-family="IBM Plex Mono,monospace" font-size="9" fill="currentColor" opacity=".6">reference model</text>
+
+      <!-- stage 3 runtime -->
+      <rect x="330" y="184" width="264" height="86" rx="3" fill="var(--accent)" opacity=".08"/>
+      <rect x="330" y="184" width="264" height="86" rx="3" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="462" y="207" text-anchor="middle" font-family="Archivo,sans-serif" font-size="13.5" font-weight="600" fill="var(--accent)">Runtime inspect</text>
+      <text x="462" y="225" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".7">fiducial align → per-part local align</text>
+      <text x="462" y="239" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".7">→ 8 tests → verdict fusion</text>
+      <text x="462" y="259" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".7">rule-based + per-package CNN</text>
+
+      <!-- pass out -->
+      <line x1="330" y1="227" x2="252" y2="227" stroke="var(--pass)" stroke-width="1.4" marker-end="url(#p1)" opacity=".9"/>
+      <text x="290" y="220" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--pass)">pass</text>
+      <rect x="130" y="210" width="118" height="34" rx="2" fill="none" stroke="var(--pass)" stroke-width="1.2"/>
+      <text x="189" y="231" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10.5" fill="var(--pass)">board released</text>
+
+      <!-- fail -->
+      <line x1="594" y1="227" x2="656" y2="227" stroke="var(--fail)" stroke-width="1.4" marker-end="url(#p1)"/>
+      <text x="625" y="220" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--fail)">fail</text>
+
+      <!-- stage 4 operator -->
+      <rect x="660" y="184" width="164" height="86" rx="3" fill="currentColor" opacity=".06"/>
+      <rect x="660" y="184" width="164" height="86" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="742" y="207" text-anchor="middle" font-family="Archivo,sans-serif" font-size="13" font-weight="600" fill="currentColor">Operator review</text>
+      <text x="742" y="225" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".65">crop vs golden,</text>
+      <text x="742" y="239" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".65">side by side</text>
+      <text x="742" y="259" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">real defect / false call</text>
+
+      <!-- feedback loop -->
+      <path d="M742,270 L742,330 L462,330" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#p2)"/>
+      <line x1="462" y1="330" x2="462" y2="276" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#p2)"/>
+      <path d="M742,330 L266,330 L266,140" fill="none" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#p2)" opacity=".75"/>
+      <text x="600" y="348" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--accent)">every verdict becomes a labelled sample</text>
+      <text x="600" y="363" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">retrains CNN · retunes thresholds · fixes ROIs</text>
+
+      <rect x="16" y="300" width="200" height="72" rx="3" fill="none" stroke="currentColor" stroke-width="1" opacity=".35"/>
+      <text x="28" y="320" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">The loop is the product.</text>
+      <text x="28" y="336" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">Rules alone plateau at 3–8%</text>
+      <text x="28" y="350" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">false calls. Operator labels</text>
+      <text x="28" y="364" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">are what drive it under 1%.</text>
+    </svg>
+    <figcaption><b>The operator review screen is not a UI afterthought — it is the training-data generator.</b> Every fail an operator adjudicates produces a labelled crop, and those labels are what take the machine from rule-based mediocrity to production-grade. Build this screen in the first release, not the third.</figcaption>
+  </figure>
+
+  <h3>The eight tests</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Per-component inspection tests, method and channel</caption>
+      <thead><tr><th>Test</th><th>Method</th><th>Channels</th><th>Difficulty</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Presence</strong></td><td>Normalised cross-correlation against golden body template, plus edge density inside the body window</td><td><span class="tag t-diff">DIFF</span></td><td><span class="tag t-pass">easy</span></td></tr>
+        <tr><td><strong>Offset &amp; skew</strong></td><td>NCC peak position within a ±0.3 mm search window; rotation swept ±15°. Parallax-corrected by package height</td><td><span class="tag t-diff">DIFF</span></td><td><span class="tag t-pass">easy</span></td></tr>
+        <tr><td><strong>Polarity</strong></td><td>Baseline: NCC of the 0° golden vs the 180° golden, take the winner. Production: small CNN per package family on the body crop</td><td><span class="tag t-diff">DIFF</span> <span class="tag t-high">HIGH</span></td><td><span class="tag t-warn">medium</span></td></tr>
+        <tr><td><strong>Wrong part</strong></td><td>Body dimensions from the segmented outline, plus marking classifier / OCR against the expected string</td><td><span class="tag t-diff">DIFF</span></td><td><span class="tag t-warn">medium</span></td></tr>
+        <tr><td><strong>Fillet quality</strong></td><td>Per-pad pixel fraction in each slope band; Mahalanobis distance against the golden distribution for that package</td><td><span class="tag t-low">LOW</span> <span class="tag t-mid">MID</span> <span class="tag t-high">HIGH</span></td><td><span class="tag t-fail">hard</span></td></tr>
+        <tr><td><strong>Bridge / short</strong></td><td>Specular response inside the inter-pad gap region defined from CAD, where only substrate should appear</td><td><span class="tag t-low">LOW</span> <span class="tag t-mid">MID</span></td><td><span class="tag t-warn">medium</span></td></tr>
+        <tr><td><strong>Tombstone</strong></td><td>Joint condition: body NCC fails <em>and</em> one pad shows a large flat high-angle area where solder should be climbing</td><td>all</td><td><span class="tag t-warn">medium</span></td></tr>
+        <tr><td><strong>Excess solder</strong></td><td>Total wetted area vs golden, plus high-angle flat fraction indicating a bulged or balled joint</td><td><span class="tag t-high">HIGH</span> <span class="tag t-mid">MID</span></td><td><span class="tag t-warn">medium</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Stack</h3>
+  <div class="col">
+    <p>Python with OpenCV and NumPy for the pipeline; the camera driven through GenICam so you are not married to one vendor's SDK. Motion and lighting speak to a single microcontroller over serial with a deliberately dumb protocol — move, settle, arm channel, strobe — so the timing-critical part is small enough to reason about. Models in PyTorch, small enough that inference runs on CPU in about a millisecond per crop; the GPU is for retraining overnight, not for running the line. What those models should and should not be asked to do is §6.</p>
+    <p>Build the operator interface as a <strong>native desktop application, not a web app</strong>. This machine sits on a factory floor and must work when the network does not, with input latency that does not make an operator wait. Push yield data to a server for reporting; keep inspection entirely local, with SQLite as the local record.</p>
+  </div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§6 · Learned inspection</p>
+    <h2>Where machine learning belongs, and where it quietly fails</h2>
+  </div>
+  <div class="col">
+    <p>The useful question is not whether to use AI but <em>where</em>. There is a version of this that fails on a factory floor and a version that works, and the difference between them is a single architectural choice: <strong>does the model have to find the components, or is it handed them?</strong></p>
+    <p>Handing them over is possible because this problem has a property most vision problems lack — <strong>the correct answer is already written down.</strong> The centroid file states that a 10&nbsp;kΩ 0402 sits at (34.2, 51.7) rotated 90°. A detector that must rediscover that from pixels is solving a far harder problem than one that starts from it, and discards the strongest prior available.</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 840 386" role="img" aria-label="Comparison of two architectures. Left: an end-to-end detector takes the whole board image straight into a large network that outputs defect boxes, requiring thousands of labelled defects and starting blind on any new assembly. Right: the CAD-anchored architecture routes the board through fiducial alignment and CAD region extraction to produce a normalised patch, on which a small model runs alongside rule-based measurements, fused into a verdict and closed by an operator loop.">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="currentColor"/></marker>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="var(--accent)"/></marker>
+        <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="var(--fail)"/></marker>
+      </defs>
+
+      <!-- ---------- LEFT: end-to-end ---------- -->
+      <text x="16" y="20" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="var(--fail)">A · END-TO-END — DOESN’T SURVIVE HERE</text>
+
+      <rect x="16" y="42" width="86" height="62" rx="2" fill="currentColor" opacity=".08" stroke="currentColor" stroke-width="1.1"/>
+      <text x="59" y="70" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">whole</text>
+      <text x="59" y="84" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">board</text>
+
+      <line x1="102" y1="73" x2="140" y2="73" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+
+      <rect x="144" y="34" width="108" height="78" rx="3" fill="var(--fail)" opacity=".08"/>
+      <rect x="144" y="34" width="108" height="78" rx="3" fill="none" stroke="var(--fail)" stroke-width="1.4"/>
+      <text x="198" y="62" text-anchor="middle" font-family="Archivo,sans-serif" font-size="12.5" font-weight="600" fill="var(--fail)">large net</text>
+      <text x="198" y="80" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".7">locate + classify</text>
+      <text x="198" y="94" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".7">in one step</text>
+
+      <line x1="252" y1="73" x2="290" y2="73" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+      <rect x="294" y="52" width="76" height="42" rx="2" fill="none" stroke="currentColor" stroke-width="1.1" opacity=".7"/>
+      <text x="332" y="78" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">boxes</text>
+
+      <g font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--fail)">
+        <text x="16" y="140">✕ needs 1000s of labelled defects per class</text>
+        <text x="16" y="156">✕ blind on every new assembly</text>
+        <text x="16" y="172">✕ no knob when it is wrong</text>
+        <text x="16" y="188">✕ degrades silently on a finish or paste change</text>
+      </g>
+      <text x="16" y="212" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".5">The CAD prior exists and is simply</text>
+      <text x="16" y="226" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".5">thrown away — that is the whole problem.</text>
+
+      <line x1="410" y1="14" x2="410" y2="372" stroke="currentColor" stroke-width="1" opacity=".18"/>
+
+      <!-- ---------- RIGHT: CAD-anchored ---------- -->
+      <text x="436" y="20" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="var(--accent)">B · CAD-ANCHORED — AI IN THE INNER LOOP</text>
+
+      <rect x="436" y="42" width="66" height="52" rx="2" fill="currentColor" opacity=".08" stroke="currentColor" stroke-width="1.1"/>
+      <text x="469" y="64" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">whole</text>
+      <text x="469" y="77" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">board</text>
+
+      <line x1="502" y1="68" x2="528" y2="68" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+
+      <rect x="532" y="42" width="84" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="574" y="62" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">fiducial +</text>
+      <text x="574" y="76" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">CAD crop</text>
+
+      <!-- the prior that A lacks -->
+      <rect x="532" y="112" width="84" height="30" rx="2" fill="var(--accent)" opacity=".12"/>
+      <rect x="532" y="112" width="84" height="30" rx="2" fill="none" stroke="var(--accent)" stroke-width="1.3"/>
+      <text x="574" y="131" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">CAD prior</text>
+      <line x1="574" y1="112" x2="574" y2="98" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#a2)"/>
+      <text x="624" y="132" font-family="IBM Plex Mono,monospace" font-size="9" fill="var(--accent)">the one edge</text>
+      <text x="624" y="144" font-family="IBM Plex Mono,monospace" font-size="9" fill="var(--accent)">A does not have</text>
+
+      <line x1="616" y1="68" x2="642" y2="68" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+
+      <rect x="646" y="42" width="86" height="52" rx="2" fill="currentColor" opacity=".06" stroke="currentColor" stroke-width="1.2"/>
+      <text x="689" y="60" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">96×96×4</text>
+      <text x="689" y="74" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">aligned</text>
+      <text x="689" y="87" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">patch</text>
+
+      <!-- three parallel judges -->
+      <line x1="689" y1="94" x2="689" y2="112" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="500" y1="112" x2="790" y2="112" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="500" y1="112" x2="500" y2="170" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+      <line x1="645" y1="164" x2="645" y2="170" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+      <line x1="645" y1="112" x2="645" y2="152" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="790" y1="112" x2="790" y2="170" stroke="currentColor" stroke-width="1.2" marker-end="url(#a1)"/>
+
+      <rect x="446" y="174" width="108" height="46" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="500" y="192" text-anchor="middle" font-family="Archivo,sans-serif" font-size="11" font-weight="600" fill="currentColor">rules</text>
+      <text x="500" y="208" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9" fill="currentColor" opacity=".65">band fractions, NCC</text>
+
+      <rect x="591" y="174" width="108" height="46" rx="2" fill="var(--accent)" opacity=".1"/>
+      <rect x="591" y="174" width="108" height="46" rx="2" fill="none" stroke="var(--accent)" stroke-width="1.3"/>
+      <text x="645" y="192" text-anchor="middle" font-family="Archivo,sans-serif" font-size="11" font-weight="600" fill="var(--accent)">anomaly score</text>
+      <text x="645" y="208" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9" fill="currentColor" opacity=".65">good boards only</text>
+
+      <rect x="736" y="174" width="98" height="46" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="785" y="192" text-anchor="middle" font-family="Archivo,sans-serif" font-size="11" font-weight="600" fill="currentColor">classifier</text>
+      <text x="785" y="208" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9" fill="currentColor" opacity=".65">polarity, part id</text>
+
+      <line x1="500" y1="220" x2="500" y2="244" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="645" y1="220" x2="645" y2="244" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="785" y1="220" x2="785" y2="244" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="500" y1="244" x2="785" y2="244" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="645" y1="244" x2="645" y2="262" stroke="currentColor" stroke-width="1.4" marker-end="url(#a1)"/>
+
+      <rect x="556" y="266" width="178" height="40" rx="3" fill="currentColor" opacity=".07"/>
+      <rect x="556" y="266" width="178" height="40" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="645" y="283" text-anchor="middle" font-family="Archivo,sans-serif" font-size="12" font-weight="600" fill="currentColor">fusion → verdict</text>
+      <text x="645" y="298" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9" fill="currentColor" opacity=".65">gradient-boosted tree on all features</text>
+
+      <line x1="734" y1="286" x2="768" y2="286" stroke="var(--fail)" stroke-width="1.3" marker-end="url(#a3)"/>
+      <text x="775" y="283" font-family="IBM Plex Mono,monospace" font-size="9" fill="var(--fail)">fails →</text>
+      <text x="775" y="295" font-family="IBM Plex Mono,monospace" font-size="9" fill="var(--fail)">operator</text>
+
+      <path d="M556,286 L520,286 L520,336 L790,336 L790,306" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#a2)"/>
+      <text x="645" y="332" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">operator labels retrain classifier + false-call filter</text>
+
+      <g font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">
+        <text x="436" y="360">✓ works day one on a new assembly</text>
+        <text x="436" y="374">✓ every stage inspectable and adjustable</text>
+      </g>
+    </svg>
+    <figcaption><b>The difference is one arrow.</b> Both architectures contain a neural network; only the right-hand one lets the network start from what the CAD already knows. Anchoring on the CAD reduces the learning problem from “find and classify defects anywhere on a board you have never seen” to “score a 96×96 patch of a package type you have thousands of examples of” — which is the difference between a problem you cannot get data for and one you already have data for.</figcaption>
+  </figure>
+
+  <h3>Match the learning problem to data you can actually get</h3>
+  <div class="col">
+    <p>Defects are rare, and that single fact eliminates most of the obvious approaches. At a healthy 200&nbsp;DPMO across 500 components, a board carries about <strong>one defect every ten boards</strong>. Collecting a thousand examples of “insufficient solder on 0402” means inspecting ten thousand boards — and the rarer classes never arrive at all. So the design question becomes: which learning problems can be fed from data that already exists?</p>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Data required vs. data obtainable, per approach</caption>
+      <thead><tr><th>Approach</th><th>Training data needed</th><th>Where it comes from</th><th>Available</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Anomaly detection</strong><span class="pn">PatchCore / PaDiM / EfficientAD</span></td>
+          <td>50–200 <em>good</em> crops per package family. No defect examples at all.</td>
+          <td>The golden boards you already scan during teach.</td>
+          <td><span class="tag t-pass">day one</span></td>
+        </tr>
+        <tr>
+          <td><strong>Polarity classifier</strong><span class="pn">small CNN, per package family</span></td>
+          <td>500–2000 crops, balanced across correct and reversed.</td>
+          <td>Golden crops, with the reversed class synthesised by rotating them 180°. Perfect labels, zero annotation.</td>
+          <td><span class="tag t-pass">day one</span></td>
+        </tr>
+        <tr>
+          <td><strong>False-call filter</strong><span class="pn">binary verifier on failed components</span></td>
+          <td>500–2000 adjudicated fails.</td>
+          <td>Operator review clicks. Every adjudication is a label, and it only ever sees components the rule layer already failed — so the classes stay roughly balanced.</td>
+          <td><span class="tag t-warn">4–8 weeks</span></td>
+        </tr>
+        <tr>
+          <td><strong>Supervised defect detector</strong><span class="pn">the intuitive approach</span></td>
+          <td>1000+ per defect class × 8 classes × ~15 package families.</td>
+          <td>Nowhere. You would need six figures of boards, and the rare classes still would not fill.</td>
+          <td><span class="tag t-fail">never</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>A · Anomaly detection is the highest-value model in the machine</h4>
+  <div class="col">
+    <p>Because it inverts the data problem. Instead of learning what defects look like, it learns what <em>normal</em> looks like and flags departures — a memory bank of feature embeddings from good patches, scored by distance to the nearest normal neighbour. It is trained entirely from the golden boards you already have to scan, so <strong>it costs no additional data collection whatsoever</strong>, and it catches failure modes nobody thought to write a rule for. This class of method is what industrial inspection benchmarks are built around, and it is the right first model to implement.</p>
+  </div>
+
+  <h4>B · Polarity is where supervised learning cleanly beats rules — and the labels are free</h4>
+  <div class="col">
+    <p>Rules struggle with polarity because the cue differs per part: a cathode stripe here, a moulded pin-1 dimple there, a printed dot somewhere else. A small network on the aligned patch handles all of them uniformly. The trick that makes it practical is that <strong>the negative class can be manufactured exactly</strong> — rotate a known-good crop 180° and you have a perfectly labelled reversed part. The same applies to gross misplacement (translate the crop) and missing components (composite the bare-pad background). Three defect classes with unlimited free training data.</p>
+  </div>
+
+  <h4>C · The false-call filter is what actually moves the number in §8</h4>
+  <div class="col">
+    <p>Run the rule and anomaly layers first, then train a second model on operator-adjudicated crops that answers only one question: <em>was this call real?</em> It sees a naturally abundant and roughly balanced dataset, because it only ever looks at components that already failed. This is the standard route from a mediocre false-call rate to a production one.</p>
+    <p>It is also the one component that can create escapes, so it gets gated rather than trusted: <strong>allowed to convert FAIL to PASS only above a high confidence threshold, with a weekly audit of a random sample of everything it suppressed.</strong> A model permitted to silently overrule the inspection is a model that will eventually overrule a real defect.</p>
+  </div>
+
+  <h3>Fuse with a tree, not a vote</h3>
+  <div class="col">
+    <p>The obvious move is to let rules and model vote and take a majority. Do not. Feed the rule <em>measurements</em> — low-band pixel fraction, NCC score, offset in microns, gap specular response — as features <strong>alongside</strong> the anomaly score into a small gradient-boosted tree. It trains on hundreds of samples rather than thousands, produces calibrated confidence rather than a raw score, and reports feature importances, so when a package type starts misbehaving you can see which measurement drifted. That last property is what makes the system debuggable eighteen months from now.</p>
+  </div>
+
+  <h3>Foundation models: useful, just not for the verdict</h3>
+  <div class="col">
+    <p>A vision-language model looking at a solder fillet at 12&nbsp;µm/px will not beat a purpose-trained six-layer network, will be orders of magnitude slower, and will occasionally state something confident and wrong. Keep them out of the inspection decision. They earn their place on the work <em>around</em> it, which is genuinely tedious:</p>
+    <ul class="tight">
+      <li><strong>Normalising line data.</strong> Centroid and BOM exports differ between every EDA tool and every contract manufacturer. Parsing them into one schema is exactly the kind of messy, format-tolerant work language models do well and rule-based parsers do badly.</li>
+      <li><strong>Building the package library from datasheets.</strong> Extracting body dimensions, termination geometry and polarity-marking convention out of PDF datasheets, which otherwise is weeks of manual data entry.</li>
+      <li><strong>Explaining a failure to an operator</strong> in a sentence, from the underlying measurements, rather than showing a bare score.</li>
+      <li><strong>Root cause across time.</strong> Summarising defect trends against process events — noticing that tombstones on one capacitor cluster rose after a paste lot changed.</li>
+    </ul>
+  </div>
+
+  <div class="callout col">
+    <p class="eyebrow">What this changes in the build plan</p>
+    <p>The learned layer stops being a final phase. Anomaly detection and the polarity classifier both train off golden-board data, so <strong>they land in Phase 3 alongside teach, not in Phase 6</strong> — and the machine starts more capable than a purely rule-based one would. Only the false-call filter has to wait for production labels. No change to the bill of materials: 500 components × four channels of 96×96 patches is well under a second per board on the specified GPU, and the small models run on CPU in about a millisecond per crop.</p>
+  </div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§7 · Edge deployment</p>
+    <h2>Raspberry Pi, and the right job for YOLO</h2>
+  </div>
+  <div class="col">
+    <p>These are two separate questions with genuinely different answers. <strong>The Pi is viable — the arithmetic works out better than you might expect. YOLO as a whole-board defect detector is not, and one number settles it.</strong></p>
+  </div>
+
+  <h3>The number that settles the YOLO question</h3>
+  <div class="col">
+    <p>A detector runs at a fixed input size, typically 640×640. Your tile is 4096×3000. Feeding one to the other means a 6.4× downscale, which takes the sampling pitch from 12&nbsp;µm/px to 77&nbsp;µm/px. At that pitch <strong>a 0402 solder fillet is under four pixels wide.</strong> There is no algorithm — none — that grades a fillet from four pixels. The information was destroyed before the model ran.</p>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 840 442" role="img" aria-label="Top: the same 0402 land pattern shown under three sampling grids — native 12 micrometres per pixel where the fillet spans 25 pixels, YOLO at 1280 input where it spans 8 pixels, and YOLO at 640 where it spans under 4 pixels. Bottom: sliding-window YOLO needs 960 inferences and five to ten seconds to rediscover component locations, while the CAD-anchored path needs 500 inferences and about one second starting from known positions.">
+      <defs>
+        <pattern id="g12" width="1.56" height="1.56" patternUnits="userSpaceOnUse">
+          <path d="M1.56,0 L0,0 0,1.56" fill="none" stroke="currentColor" stroke-width=".22" opacity=".55"/>
+        </pattern>
+        <pattern id="g38" width="4.99" height="4.99" patternUnits="userSpaceOnUse">
+          <path d="M4.99,0 L0,0 0,4.99" fill="none" stroke="currentColor" stroke-width=".5" opacity=".75"/>
+        </pattern>
+        <pattern id="g77" width="9.98" height="9.98" patternUnits="userSpaceOnUse">
+          <path d="M9.98,0 L0,0 0,9.98" fill="none" stroke="currentColor" stroke-width=".7" opacity=".9"/>
+        </pattern>
+        <marker id="e1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="currentColor"/></marker>
+        <marker id="e2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="var(--accent)"/></marker>
+      </defs>
+
+      <text x="20" y="20" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="currentColor" opacity=".55">A · THE SAME 0402, UNDER THREE SAMPLING GRIDS</text>
+
+      <!-- ---- cell 1: native ---- -->
+      <g>
+        <text x="20" y="48" font-family="Archivo,sans-serif" font-size="12.5" font-weight="600" fill="var(--pass)">Native · 12 µm/px</text>
+        <rect x="20" y="60" width="247" height="98" fill="currentColor" opacity=".05"/>
+        <rect x="20" y="72" width="70" height="74" fill="var(--accent)" opacity=".55"/>
+        <rect x="197" y="72" width="70" height="74" fill="var(--accent)" opacity=".55"/>
+        <rect x="72" y="82" width="143" height="54" fill="currentColor" opacity=".62"/>
+        <path d="M56,146 Q68,142 72,110 L72,146 Z" fill="var(--accent)"/>
+        <path d="M231,146 Q219,142 215,110 L215,146 Z" fill="var(--accent)"/>
+        <rect x="20" y="60" width="247" height="98" fill="url(#g12)"/>
+        <rect x="20" y="60" width="247" height="98" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="20" y="176" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">body 83 × 42 px</text>
+        <text x="20" y="190" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--pass)">fillet 25 px — gradable</text>
+      </g>
+
+      <!-- ---- cell 2: 1280 ---- -->
+      <g>
+        <text x="297" y="48" font-family="Archivo,sans-serif" font-size="12.5" font-weight="600" fill="var(--warn)">YOLO @1280 · 38 µm/px</text>
+        <rect x="297" y="60" width="247" height="98" fill="currentColor" opacity=".05"/>
+        <rect x="297" y="72" width="70" height="74" fill="var(--accent)" opacity=".55"/>
+        <rect x="474" y="72" width="70" height="74" fill="var(--accent)" opacity=".55"/>
+        <rect x="349" y="82" width="143" height="54" fill="currentColor" opacity=".62"/>
+        <path d="M333,146 Q345,142 349,110 L349,146 Z" fill="var(--accent)"/>
+        <path d="M508,146 Q496,142 492,110 L492,146 Z" fill="var(--accent)"/>
+        <rect x="297" y="60" width="247" height="98" fill="url(#g38)"/>
+        <rect x="297" y="60" width="247" height="98" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="297" y="176" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">body 26 × 13 px</text>
+        <text x="297" y="190" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--warn)">fillet 8 px — marginal</text>
+      </g>
+
+      <!-- ---- cell 3: 640 ---- -->
+      <g>
+        <text x="574" y="48" font-family="Archivo,sans-serif" font-size="12.5" font-weight="600" fill="var(--fail)">YOLO @640 · 77 µm/px</text>
+        <rect x="574" y="60" width="247" height="98" fill="currentColor" opacity=".05"/>
+        <rect x="574" y="72" width="70" height="74" fill="var(--accent)" opacity=".55"/>
+        <rect x="751" y="72" width="70" height="74" fill="var(--accent)" opacity=".55"/>
+        <rect x="626" y="82" width="143" height="54" fill="currentColor" opacity=".62"/>
+        <path d="M610,146 Q622,142 626,110 L626,146 Z" fill="var(--accent)"/>
+        <path d="M785,146 Q773,142 769,110 L769,146 Z" fill="var(--accent)"/>
+        <rect x="574" y="60" width="247" height="98" fill="url(#g77)"/>
+        <rect x="574" y="60" width="247" height="98" fill="none" stroke="currentColor" stroke-width="1"/>
+        <text x="574" y="176" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor">body 13 × 6 px</text>
+        <text x="574" y="190" font-family="IBM Plex Mono,monospace" font-size="10" fill="var(--fail)">fillet 4 px — gone</text>
+      </g>
+
+      <line x1="20" y1="212" x2="820" y2="212" stroke="currentColor" stroke-width="1" opacity=".18"/>
+
+      <!-- ---- PANEL B ---- -->
+      <text x="20" y="238" font-family="IBM Plex Mono,monospace" font-size="11" letter-spacing="1.2" fill="currentColor" opacity=".55">B · TWO WAYS TO REACH A COMPONENT</text>
+
+      <!-- path 1 -->
+      <text x="20" y="266" font-family="Archivo,sans-serif" font-size="12.5" font-weight="600" fill="var(--fail)">Sliding-window YOLO</text>
+      <rect x="20" y="280" width="74" height="40" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <text x="57" y="298" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">tile</text>
+      <text x="57" y="311" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">4096×3000</text>
+      <line x1="94" y1="300" x2="122" y2="300" stroke="currentColor" stroke-width="1.2" marker-end="url(#e1)"/>
+      <rect x="126" y="280" width="80" height="40" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <text x="166" y="298" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">48 windows</text>
+      <text x="166" y="311" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">per tile</text>
+      <line x1="206" y1="300" x2="234" y2="300" stroke="currentColor" stroke-width="1.2" marker-end="url(#e1)"/>
+      <rect x="238" y="276" width="96" height="48" rx="2" fill="var(--fail)" opacity=".09"/>
+      <rect x="238" y="276" width="96" height="48" rx="2" fill="none" stroke="var(--fail)" stroke-width="1.3"/>
+      <text x="286" y="295" text-anchor="middle" font-family="Archivo,sans-serif" font-size="11.5" font-weight="600" fill="var(--fail)">960 infer.</text>
+      <text x="286" y="311" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".7">5–10 s, 1 channel</text>
+      <line x1="334" y1="300" x2="362" y2="300" stroke="currentColor" stroke-width="1.2" marker-end="url(#e1)"/>
+      <rect x="366" y="280" width="92" height="40" rx="2" fill="none" stroke="currentColor" stroke-width="1.1" opacity=".7"/>
+      <text x="412" y="298" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">boxes</text>
+      <text x="412" y="311" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">+ class score</text>
+      <text x="20" y="340" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--fail)">Spends 5–10 s rediscovering positions the centroid file already states exactly — and returns a score, not a measurement.</text>
+
+      <!-- path 2 -->
+      <text x="20" y="376" font-family="Archivo,sans-serif" font-size="12.5" font-weight="600" fill="var(--accent)">CAD-anchored</text>
+      <rect x="20" y="390" width="74" height="40" rx="2" fill="var(--accent)" opacity=".12"/>
+      <rect x="20" y="390" width="74" height="40" rx="2" fill="none" stroke="var(--accent)" stroke-width="1.3"/>
+      <text x="57" y="408" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">centroid</text>
+      <text x="57" y="421" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="var(--accent)">file</text>
+      <line x1="94" y1="410" x2="122" y2="410" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#e2)"/>
+      <rect x="126" y="390" width="80" height="40" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <text x="166" y="408" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">exact ROI</text>
+      <text x="166" y="421" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">µs, free</text>
+      <line x1="206" y1="410" x2="234" y2="410" stroke="currentColor" stroke-width="1.2" marker-end="url(#e1)"/>
+      <rect x="238" y="386" width="96" height="48" rx="2" fill="var(--pass)" opacity=".1"/>
+      <rect x="238" y="386" width="96" height="48" rx="2" fill="none" stroke="var(--pass)" stroke-width="1.3"/>
+      <text x="286" y="405" text-anchor="middle" font-family="Archivo,sans-serif" font-size="11.5" font-weight="600" fill="var(--pass)">500 infer.</text>
+      <text x="286" y="421" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".7">~1 s, 4 channels</text>
+      <line x1="334" y1="410" x2="362" y2="410" stroke="currentColor" stroke-width="1.2" marker-end="url(#e1)"/>
+      <rect x="366" y="390" width="120" height="40" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>
+      <text x="426" y="408" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor">measurements</text>
+      <text x="426" y="421" text-anchor="middle" font-family="IBM Plex Mono,monospace" font-size="9.5" fill="currentColor" opacity=".6">at full 12 µm/px</text>
+
+      <text x="520" y="380" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".6">Same accelerator. Same YOLO tooling.</text>
+      <text x="520" y="396" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".6">6× less compute, full resolution kept,</text>
+      <text x="520" y="412" font-family="IBM Plex Mono,monospace" font-size="10" fill="currentColor" opacity=".6">and no defect bounding boxes to label.</text>
+    </svg>
+    <figcaption><b>Downscaling to a detector's input size destroys the measurement before the model sees it.</b> The lower panel shows the second cost: a sliding window spends 960 inferences rediscovering component positions that the centroid file states exactly and for free. Anchoring on CAD keeps full resolution, cuts inference count roughly sixfold, and removes the need for labelled defect boxes entirely.</figcaption>
+  </figure>
+
+  <h3>So use YOLO — on the crop, not the board</h3>
+  <div class="col">
+    <p>None of this argues against the Ultralytics toolchain, which is genuinely good: easy training, clean export, first-class accelerator support. Keep it. Just point it at a different input. <strong>Run the detection head on the whole board where objects are large and few, and the classification and segmentation heads on the CAD-cropped patch where the resolution still exists.</strong></p>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Where each YOLO head earns its place</caption>
+      <thead><tr><th>Task</th><th>Model</th><th>Input</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Board present, right product, right orientation</strong></td><td>YOLO-detect</td><td>Whole platen, 640×640</td><td><span class="tag t-pass">good fit</span> — large objects, low res is plenty</td></tr>
+        <tr><td><strong>Fiducial &amp; panel location</strong></td><td>YOLO-detect</td><td>Whole board, 640×640</td><td><span class="tag t-pass">good fit</span> — replaces fiddly classical CV</td></tr>
+        <tr><td><strong>Foreign object, gross damage</strong></td><td>YOLO-detect</td><td>Whole board, 640×640</td><td><span class="tag t-pass">good fit</span> — genuinely detector-shaped</td></tr>
+        <tr><td><strong>Polarity, wrong part</strong></td><td>YOLO-<em>cls</em></td><td>96×96 CAD crop, 4-channel</td><td><span class="tag t-pass">good fit</span> — free labels via 180° rotation</td></tr>
+        <tr><td><strong>Solder region extraction per pad</strong></td><td>YOLO-<em>seg</em></td><td>96×96 CAD crop</td><td><span class="tag t-pass">good fit</span> — segment, then measure band fractions inside the mask</td></tr>
+        <tr><td><strong>ROI bootstrap when no CAD exists</strong></td><td>YOLO-detect</td><td>Tile at native res</td><td><span class="tag t-warn">fallback only</span> — for legacy or customer boards, human-corrected</td></tr>
+        <tr><td><strong>Fillet grading, tombstone, bridges</strong></td><td>—</td><td>—</td><td><span class="tag t-fail">not a detection task</span> — these are measurements against a golden distribution</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>The segmentation row is the most interesting one. Using YOLO-seg to isolate the solder region on each pad, then computing the §1 slope-band fractions <em>inside that mask</em> rather than inside a fixed rectangle, removes the pipeline's biggest source of noise — pad regions that clip a neighbouring component or catch a bit of silkscreen. That is YOLO doing something it is genuinely better at than a threshold.</p>
+  </div>
+
+  <h3>The Pi holds up — with four constraints</h3>
+  <div class="col">
+    <p>The architecture in §5 turns out to be unusually Pi-friendly, because all the heavy work already happens inside small CAD-defined patches rather than across full frames. Streaming tile by tile, <strong>peak memory is about 49&nbsp;MB</strong> — nothing. Four things do need designing around:</p>
+    <ul class="tight">
+      <li><strong>Use a USB3 camera, not GigE.</strong> A board is roughly 1&nbsp;GB of raw frames. Over the Pi's single Gigabit port that is about 9 seconds of pure transfer; over USB3 it is about 2.6. This one choice matters more than anything else in the Pi build.</li>
+      <li><strong>Store crops, not frames.</strong> Keeping full frames is a gigabyte per board and will fill any disk within a week. Keep the 96×96 patches instead — about 5&nbsp;MB compressed per board — and retain full frames only for components that failed. That is also exactly the data the retraining loop needs.</li>
+      <li><strong>Mind the single PCIe lane.</strong> The Pi 5 has one PCIe x1, and both an AI accelerator and an NVMe drive want it. Simplest resolution: accelerator on PCIe, storage on an external USB3 SSD. Avoid PCIe switch HATs on a machine that has to be reliable.</li>
+      <li><strong>The Pi cannot train.</strong> It runs inference only. Retraining the classifiers and refitting the fusion model happens on a separate machine — any ordinary desktop with a GPU — and compiled models get pushed to the station. This is a normal edge split, but it means the workstation does not fully disappear from the budget, it just moves off the machine and gets shared across stations.</li>
+    </ul>
+    <p>One deployment note specific to accelerators: models must be quantised to int8 to run on a Hailo-class device, and <strong>quantisation error is not free on a task this close to measurement.</strong> Validate post-quantisation accuracy against the float model on a held-out set before trusting it — a two-point drop in classifier accuracy is a meaningful change in false call rate. Also prefer a purely convolutional anomaly model such as EfficientAD over a memory-bank method like PatchCore here, since the former compiles cleanly to the accelerator while the latter leaves a nearest-neighbour search stranded on the CPU.</p>
+  </div>
+
+  <div class="callout col">
+    <p class="eyebrow">What it costs</p>
+    <p>Swapping the workstation for a Pi edge node takes <strong>$1,368 out of the station</strong>, and adds one training machine shared across every station you build. Both configurations are costed line by line in §9 — that table is the single source of truth for price, not this section.</p>
+  </div>
+
+
+  <div class="callout col">
+    <p class="eyebrow">Recommendation</p>
+    <p><strong>Develop on the workstation, deploy on the Pi.</strong> During Phases 1–5 you will re-run the pipeline over the same boards hundreds of times while tuning, and a Pi makes every one of those iterations slower — which shows up as weeks, not minutes. Because the architecture is CAD-anchored and patch-based, the port is a deployment step rather than a rewrite: the same models, quantised and recompiled. Freeze the pipeline first, then move it.</p>
+    <p>If the goal is several stations, the Pi is clearly right and the case gets stronger with each unit. If it is one station, build it on the workstation and treat the Pi as a Phase 7 cost-reduction.</p>
+  </div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§8 · Acceptance</p>
+    <h2>False call rate is the only number that decides this</h2>
+  </div>
+  <div class="col">
+    <p>AOI projects rarely fail because they miss defects. They fail because they cry wolf, operators learn to click through, and within a month the machine is a very expensive conveyor. On a 500-component board, the per-component false-call probability compounds fast:</p>
+  </div>
+  <div class="tbl-scroll col">
+    <table>
+      <caption>False calls per 500-component board, and what happens</caption>
+      <thead><tr><th class="num">Per-component FCR</th><th class="num">False calls / board</th><th>Operator reality</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0.05%</td><td class="num">0.25</td><td><span class="tag t-pass">Commercial-grade.</span> One review every four boards.</td></tr>
+        <tr><td class="num">0.2%</td><td class="num">1.0</td><td><span class="tag t-pass">Target for this build.</span> Roughly 20 s of review per board.</td></tr>
+        <tr><td class="num">1%</td><td class="num">5.0</td><td><span class="tag t-warn">Tolerable but disliked.</span> Review becomes the bottleneck.</td></tr>
+        <tr><td class="num">5%</td><td class="num">25</td><td><span class="tag t-fail">Machine gets ignored.</span> Operators rubber-stamp; escapes rise <em>above</em> the no-AOI baseline.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>Expect the rule-based pipeline alone to land somewhere around <strong>3–8%</strong> on real production boards. That is not a failure of the design — it is the normal starting point, and it is exactly why the operator feedback loop exists. Getting from there to under 1% is a data problem solved over weeks of production, not an algorithm problem solved in a sprint. <strong>Plan the schedule around that tuning period rather than treating first-light as completion.</strong></p>
+    <p>Track three numbers from day one, per package type: false call rate, escape rate against a periodically hand-inspected sample, and review time per board. Package-level breakdown is what tells you where to spend effort — it is usually two or three troublesome packages generating most of the noise.</p>
+  </div>
+</section>
+
+<!-- ============ 9 ============ -->
+<section>
+  <div class="sec-head">
+    <p class="eyebrow">§9 · Bill of materials</p>
+    <h2>Costed hardware, one station</h2>
+  </div>
+  <div class="col">
+    <p>Everything below is common to both compute configurations except the block marked <em>choose one</em>. Optics, illumination, motion and fixture do not change whether the pipeline runs on a workstation or on a Pi.</p>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Common to both configurations — indicative USD, ex-works</caption>
+      <thead><tr><th>Item</th><th>Specification / candidate</th><th class="num">Qty</th><th class="num">USD</th></tr></thead>
+      <tbody>
+        <tr class="sub"><td colspan="4">Imaging</td></tr>
+        <tr><td>Area-scan camera</td><td>12 MP mono, Sony IMX304, 1.1″. <strong>USB3 interface</strong> if deploying to Pi — see §7<span class="pn">Hikrobot MV-CU120-10UM · Basler a2A4112-8umBAS · FLIR BFS-U3-120S4M</span></td><td class="num">1</td><td class="num">800</td></tr>
+        <tr><td>Lens</td><td>75 mm fixed focal, 1.1″ image circle, low distortion<span class="pn">Kowa LM75HC-VSW or Computar V7528-MPZ</span></td><td class="num">1</td><td class="num">420</td></tr>
+        <tr><td>Extension tubes</td><td>C-mount set, 21.6 mm effective for 0.2875×</td><td class="num">1</td><td class="num">45</td></tr>
+        <tr><td>Lens shade + filter</td><td>Matte baffle, bandpass matched to LED wavelength</td><td class="num">1</td><td class="num">65</td></tr>
+
+        <tr class="sub"><td colspan="4">Illumination</td></tr>
+        <tr><td>Multi-angle dome/ring</td><td>3 switchable elevation zones + diffuse, ⌀120–150 mm<span class="pn">OPT Machine Vision multi-angle series, CCS, or Effilux</span></td><td class="num">1</td><td class="num">700</td></tr>
+        <tr><td>Strobe controller</td><td>4-channel constant-current, overdrive-capable, opto-isolated trigger in</td><td class="num">1</td><td class="num">240</td></tr>
+
+        <tr class="sub"><td colspan="4">Motion</td></tr>
+        <tr><td>XY linear stage</td><td>200 × 200 mm travel, HIWIN MGN12 rails, 1204 ballscrew</td><td class="num">1</td><td class="num">620</td></tr>
+        <tr><td>Motors + drivers</td><td>NEMA 23 closed-loop stepper, 2 axes</td><td class="num">2</td><td class="num">280</td></tr>
+        <tr><td>Motion controller</td><td>32-bit MCU board, step/dir out, camera trigger sync</td><td class="num">1</td><td class="num">120</td></tr>
+        <tr><td>Z focus adjust</td><td>Manual micrometer slide, 25 mm, lockable</td><td class="num">1</td><td class="num">130</td></tr>
+        <tr><td>Drag chain + cabling</td><td>Shielded, data + power + trigger to moving head</td><td class="num">1</td><td class="num">150</td></tr>
+
+        <tr class="sub"><td colspan="4">Fixture</td></tr>
+        <tr><td>Vacuum platen</td><td>Machined aluminium, 200 × 200 mm, vacuum grid, ESD-dissipative surface</td><td class="num">1</td><td class="num">280</td></tr>
+        <tr><td>Vacuum source</td><td>Venturi ejector or small pump, solenoid, filter, gauge</td><td class="num">1</td><td class="num">140</td></tr>
+        <tr><td>Board stops / datum</td><td>Adjustable edge locators, 2 pins + 1 clamp</td><td class="num">1</td><td class="num">90</td></tr>
+
+        <tr class="sub"><td colspan="4">Frame &amp; enclosure</td></tr>
+        <tr><td>Gantry &amp; base</td><td>40 × 40 aluminium extrusion, cast tooling plate base</td><td class="num">1</td><td class="num">400</td></tr>
+        <tr><td>Light-tight enclosure</td><td>Panels, matte black interior, interlocked door, ESD bonding</td><td class="num">1</td><td class="num">330</td></tr>
+
+        <tr class="sub"><td colspan="4">HMI</td></tr>
+        <tr><td>Touch monitor</td><td>24″ 1080p capacitive touch</td><td class="num">1</td><td class="num">260</td></tr>
+        <tr><td>Barcode scanner</td><td>2D imager, USB, for board serial traceability</td><td class="num">1</td><td class="num">85</td></tr>
+
+        <tr class="sub"><td colspan="4">Electrical &amp; sundries</td></tr>
+        <tr><td>PSUs, wiring, E-stop</td><td>24 V / 12 V supplies, DIN rail, emergency stop, indicator stack</td><td class="num">1</td><td class="num">290</td></tr>
+        <tr><td>Fasteners, mounts, misc</td><td>Brackets, hardware, connectors, consumables</td><td class="num">1</td><td class="num">180</td></tr>
+        <tr><td>Calibration targets</td><td>Chrome-on-glass dot grid + certified reflectance standards</td><td class="num">1</td><td class="num">220</td></tr>
+
+        <tr class="total"><td colspan="3">Common subtotal</td><td class="num">$5,845</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Compute — choose one</caption>
+      <thead><tr><th>Config</th><th>Item</th><th>Specification</th><th class="num">USD</th></tr></thead>
+      <tbody>
+        <tr class="sub"><td colspan="4">A · Workstation — recommended for the first station</td></tr>
+        <tr><td rowspan="2" style="vertical-align:middle"><strong>A</strong></td><td>Workstation</td><td>Core i7 / Ryzen 7, 32 GB, 1 TB NVMe, dual GigE NIC</td><td class="num">1,150</td></tr>
+        <tr><td>GPU</td><td>RTX 4060 8 GB — trains and infers on the same box</td><td class="num">330</td></tr>
+        <tr><td colspan="3"><em>Config A compute subtotal</em></td><td class="num">1,480</td></tr>
+
+        <tr class="sub"><td colspan="4">B · Raspberry Pi edge node — for multi-station rollout</td></tr>
+        <tr><td rowspan="3" style="vertical-align:middle"><strong>B</strong></td><td>Raspberry Pi 5</td><td>16 GB, active cooler, 27 W PSU</td><td class="num">150</td></tr>
+        <tr><td>AI accelerator</td><td>Raspberry Pi AI HAT+, Hailo-8L 13 TOPS<span class="pn">26 TOPS Hailo-8 version if you want headroom</span></td><td class="num">110</td></tr>
+        <tr><td>USB3 SSD</td><td>1 TB — crop retention and local records. Not NVMe: the single PCIe lane goes to the accelerator</td><td class="num">80</td></tr>
+        <tr><td colspan="3"><em>Config B compute subtotal</em></td><td class="num">340</td></tr>
+        <tr><td colspan="3"><em>Shared training machine — one per site, not per station</em></td><td class="num">1,200</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Station totals</caption>
+      <thead><tr><th>&nbsp;</th><th class="num">A · Workstation</th><th class="num">B · Pi edge node</th></tr></thead>
+      <tbody>
+        <tr><td>Common hardware</td><td class="num">5,845</td><td class="num">5,845</td></tr>
+        <tr><td>Compute</td><td class="num">1,480</td><td class="num">340</td></tr>
+        <tr><td>Subtotal</td><td class="num">7,325</td><td class="num">6,185</td></tr>
+        <tr><td>Contingency @ 20% <span class="note">— first-build rework, wrong brackets, a second lens</span></td><td class="num">1,465</td><td class="num">1,237</td></tr>
+        <tr class="total"><td>Per station</td><td class="num">$8,790</td><td class="num">$7,422</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Which configuration is actually cheaper</h3>
+  <div class="col">
+    <p>The Pi saves $1,368 per station but needs one training machine somewhere. That fixed cost is what decides it, and it only pays back with volume:</p>
+  </div>
+  <div class="tbl-scroll col">
+    <table>
+      <caption>Total outlay by station count</caption>
+      <thead><tr><th class="num">Stations</th><th class="num">A · Workstation</th><th class="num">B · Pi + one trainer</th><th class="num">Saving with B</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td class="num">8,790</td><td class="num">8,622</td><td class="num">168</td></tr>
+        <tr><td class="num">2</td><td class="num">17,580</td><td class="num">16,044</td><td class="num">1,536</td></tr>
+        <tr><td class="num">3</td><td class="num">26,370</td><td class="num">23,466</td><td class="num">2,904</td></tr>
+        <tr><td class="num">5</td><td class="num">43,950</td><td class="num">38,310</td><td class="num">5,640</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>At one station it is a rounding error — which is why §7 recommends building the first unit on a workstation regardless, since you will be iterating constantly during development. <strong>If you already have an office desktop with a mid-range GPU that can serve as the trainer, drop $1,200 from column B throughout</strong> and the Pi wins by $1,368 even on a single station.</p>
+  </div>
+
+  <div class="callout col">
+    <p class="eyebrow">Reading these numbers honestly</p>
+    <p>Prices are indicative mid-2026 ex-works figures for reference-class parts, and they move. Landed cost in India will run meaningfully higher once customs duty, IGST and freight are applied to the imported optics and camera — <strong>budget roughly 1.35–1.5× on the imported line items</strong>, which puts a Config A station somewhere around ₹9–10 lakh and Config B around ₹7.5–8.5 lakh landed. Get a real quote from a local machine-vision distributor before committing; several of these brands have Indian stocking agents whose landed price beats direct import.</p>
+    <p>More importantly: <strong>the hardware is not the cost of this project.</strong> §10 is.</p>
+  </div>
+</section>
+
+<!-- ============ 10 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§10 · Build plan</p>
+    <h2>Phases, with exit criteria that mean something</h2>
+  </div>
+  <div class="col">
+    <p>Each phase below ends on a test you can objectively fail. Resist starting the next phase until the current one passes — the failure mode on machines like this is a half-calibrated rig that everyone keeps writing algorithms against.</p>
+  </div>
+
+  <ol class="phases">
+    <li>
+      <h4>Mechanical build and optical alignment</h4>
+      <p class="dur">3–4 weeks</p>
+      <p>Frame, gantry, vacuum platen, enclosure. Camera and lens mounted, squared, focused. No software beyond a live view.</p>
+      <p class="exit"><b>Exit</b> — A chrome-on-glass dot grid resolves at 12 ±0.3 µm/px across the full tile, corner to corner, with distortion mapped and under 0.5 px after correction. Optical axis square to the platen within 0.2°.</p>
+    </li>
+    <li>
+      <h4>Illumination and capture chain</h4>
+      <p class="dur">3–4 weeks</p>
+      <p>Dome mounted, four channels wired, hardware strobe synchronised to the camera. Automated tile raster with settle detection.</p>
+      <p class="exit"><b>Exit</b> — Channel uniformity within ±5% across the tile. The same board scanned 20 times over an 8-hour period varies less than 2% in per-channel mean intensity. Frame-to-channel pairing never slips under sustained load.</p>
+    </li>
+    <li>
+      <h4>Program generation and teach</h4>
+      <p class="dur">2–3 weeks</p>
+      <p>Centroid and BOM import, package library, automatic ROI generation, fiducial alignment, golden-board capture and statistics. Because they train on golden data alone, the anomaly model and the polarity classifier of §6 are built here too.</p>
+      <p class="exit"><b>Exit</b> — A real production assembly imports and generates correct ROIs for over 98% of designators with no manual editing, verified by overlay against a scanned board.</p>
+    </li>
+    <li>
+      <h4>Rule-based inspection</h4>
+      <p class="dur">4–6 weeks</p>
+      <p>All eight tests implemented. Parallax correction. Verdict fusion and per-component confidence.</p>
+      <p class="exit"><b>Exit</b> — On a seeded board with 30 deliberately induced defects across all four classes, catches at least 28. False call rate may still be high; do not tune it yet.</p>
+    </li>
+    <li>
+      <h4>Operator station and traceability</h4>
+      <p class="dur">3–4 weeks</p>
+      <p>Review screen, defect map, serial scanning, SQLite records, yield reporting. Every adjudicated verdict stored as a labelled crop.</p>
+      <p class="exit"><b>Exit</b> — An operator with 30 minutes of training reviews a full board's fails in under 60 seconds and the labels land correctly in the dataset.</p>
+    </li>
+    <li>
+      <h4>False-call filter and tuning to production</h4>
+      <p class="dur">8–14 weeks</p>
+      <p>The false-call filter trained on accumulated operator labels; fusion tree fitted per package; retraining pipeline automated. This runs alongside real production and is the only stage that cannot start earlier.</p>
+      <p class="exit"><b>Exit</b> — Under 1% per-component false call rate sustained across your three highest-volume assemblies, with escape rate measured against hand inspection and no worse than current manual QC.</p>
+    </li>
+  </ol>
+
+  <div class="col">
+    <p><strong>Total: roughly 6–9 months with one dedicated engineer</strong>, or 4–5 months with a mechanical/electrical person and a vision-software person working in parallel. Phase 6 is the one that gets underestimated; it is also the one that determines whether the machine is used.</p>
+  </div>
+</section>
+
+<!-- ============ 11 ============ -->
+<section>
+  <div class="sec-head col">
+    <p class="eyebrow">§11 · Limits</p>
+    <h2>What this machine will not do</h2>
+  </div>
+  <div class="col">
+    <p>Worth being explicit about, so nobody discovers it at month five:</p>
+    <ul class="tight">
+      <li><strong>No true height measurement.</strong> Slope inference grades fillets well and catches gross coplanarity problems, but it does not measure solder volume. If you later need real volumetric grading or coplanarity to a spec, that is a 3D sensor — laser triangulation or fringe projection — and a different machine.</li>
+      <li><strong>Nothing under a BGA.</strong> No optical method sees hidden joints. BGA voiding and opens need X-ray, full stop.</li>
+      <li><strong>Bottom side needs a second pass.</strong> Single camera, single side. Double-sided assemblies get flipped and scanned again.</li>
+      <li><strong>Fine-pitch IC leads are marginal.</strong> A 0.5 mm-pitch QFP lead lands at about 21 px, workable for presence and gross bridging but not for lead coplanarity or subtle wetting.</li>
+      <li><strong>Tall components go soft.</strong> Bodies above roughly 1.1 mm fall outside the depth of field; their joints stay sharp, but marking OCR on tall parts will need a second focus pass if you want it.</li>
+    </ul>
+    <p>One last piece of arithmetic worth having in the room. This build saves perhaps $20–35k in capital against an entry-level commercial AOI, and costs 6–9 engineer-months. Purely on capex-versus-labour that is close to a wash. <strong>It becomes clearly worth doing if you will build more than one unit, if you need inspection behaviour a commercial machine's closed software will not give you, or if in-house vision capability is itself something you want to own.</strong> You have already made that call — this document assumes it and does not relitigate it. But it is worth confirming that at least one of those three reasons genuinely applies before Phase 1 starts, because the answer changes nothing about the design and everything about whether to build it.</p>
+  </div>
+</section>
+
+<footer class="col">
+  <p>AOI Station One · design specification Rev A · offline benchtop configuration · 0402 minimum, 150 mm maximum board. Optical figures computed for Sony IMX304 at 0.2875× magnification; verify against the datasheet of the specific camera you procure before ordering lenses.</p>
+</footer>
+
+</div>
