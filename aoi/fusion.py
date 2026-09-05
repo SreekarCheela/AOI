@@ -15,8 +15,19 @@ from pathlib import Path
 
 import numpy as np
 
-from . import config
+from . import config, packages
 from .rules import FEATURE_NAMES, Golden, Measure, band_distance
+
+
+def _land_name(pkg, i: int) -> str:
+    """Name a terminal the way an operator would look for it on the board."""
+    lands = pkg.lands()
+    if i >= len(lands):
+        return f"pad {i}"
+    if pkg.is_two_terminal:
+        return f"pad {i}"
+    l = lands[i]
+    return f"lead {i + 1} ({l.row} {l.index + 1})"
 
 
 @dataclass
@@ -46,6 +57,7 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
     mislabel them all as insufficient solder. Real AOI gates the same way.
     """
     g = golden.packages.get(m.package)
+    pkg = packages.get(m.package)
 
     def V(reason: str, sev: float, detail: str) -> Verdict:
         return Verdict(m.refdes, m.package, True, float(min(1.0, 0.5 + sev / 2.0)),
@@ -88,7 +100,11 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
                      f"no body found (area {m.body_area_ratio:.2f} of golden, "
                      f"NCC {m.ncc:.2f} vs {g.ncc_mean:.2f})")
 
-        if not body_gone and m.body_aspect < config.BODY_STANDING_ASPECT:
+        # Only a two-terminal part can stand on one land -- an eight-lead SOIC
+        # has nowhere to stand. The gate is not decoration: a QFP body is square,
+        # so its aspect is ~1.0 and every one of them would read as a tombstone.
+        if (not body_gone and pkg.is_two_terminal
+                and m.body_aspect < config.BODY_STANDING_ASPECT):
             return V("tombstone",
                      1.0 - m.body_aspect / config.BODY_STANDING_ASPECT,
                      f"body spans {m.body_aspect:.2f}x its own width, standing "
@@ -136,7 +152,7 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
     #    1080 good-component inspections.
     if g is not None:
         dist = band_distance(m.bands, g)
-        for pad in range(2):
+        for pad in range(len(dist)):
             # One-sided on purpose. Mahalanobis distance is symmetric, so a joint
             # carrying MORE solder than golden sits just as far from the mean as
             # a starved one. Without this guard a heavy fillet gets reported as
@@ -145,7 +161,7 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
             if dist[pad] > config.BAND_MAHALANOBIS_FAIL \
                     and m.bands[pad, 0] < g.band_mean[pad, 0]:
                 return V("insufficient", dist[pad] / config.BAND_MAHALANOBIS_FAIL,
-                         f"pad {pad} fillet d={dist[pad]:.1f} from golden, "
+                         f"{_land_name(pkg, pad)} fillet d={dist[pad]:.1f} from golden, "
                          f"low-angle band {m.bands[pad, 0]:.2f} vs "
                          f"{g.band_mean[pad, 0]:.2f}")
 

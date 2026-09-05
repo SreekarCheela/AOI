@@ -119,14 +119,12 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
                       mm_per_px: float, place_sigma_um: float) -> _Patch:
     p = _Patch(pkg, mm_per_px)
     X, Y = p.X, p.Y
-    pad_hx, pad_hy = pkg.pad_l / 2.0, pkg.pad_w / 2.0
-    d = pkg.pad_pitch / 2.0
+    lands = pkg.lands()
     body_hx, body_hy = pkg.body_l / 2.0, pkg.body_w / 2.0
-    h_term = pkg.body_h * 0.72
 
     # --- lands ---------------------------------------------------------------
-    for sgn in (-1.0, +1.0):
-        p.paint(_rect(X, Y, sgn * d, 0.0, pad_hx, pad_hy), COPPER)
+    for l in lands:
+        p.paint(_rect(X, Y, l.cx, l.cy, l.hx, l.hy), COPPER)
 
     if defect.kind == "missing":
         return p                                   # bare copper, nothing else
@@ -136,12 +134,14 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
     jy = rng.normal(0.0, place_sigma_um / 1000.0)
     ox, oy, oth = defect.dx + jx, defect.dy + jy, defect.dtheta
 
-    if defect.kind == "tombstone":
+    if defect.kind == "tombstone" and pkg.is_two_terminal:
         # One end lifted: the body stands on its surviving joint, the other land
         # is left bare. The surviving fillet is built with the same signed-axis
         # convention as a normal joint so it lands inside the pad's fillet window
         # and still reads as wetted -- that one lit joint is exactly what
         # separates a tombstone from a part that was never placed.
+        d = pkg.pad_pitch / 2.0
+        pad_hx = pkg.pad_l / 2.0
         sgn = -1.0 if defect.pad == 0 else 1.0
         stand_x = sgn * d
         p.paint(_rect(X, Y, stand_x, 0.0, pkg.body_w / 2.0, body_hy), BODY)
@@ -152,7 +152,8 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
                 0.85 * pkg.body_h)
         sl = _fillet_slope(X * sgn, x_toe * sgn, x_term * sgn, h, FILLET_POWER)
         lo, hi = sorted((x_toe, x_term))
-        p.paint((X >= lo) & (X <= hi) & (np.abs(Y) <= pad_hy * 0.90), SOLDER, sl)
+        p.paint((X >= lo) & (X <= hi) & (np.abs(Y) <= pkg.pad_w / 2.0 * 0.90),
+                SOLDER, sl)
         return p
 
     # --- de-rotated body coordinates for skew --------------------------------
@@ -161,20 +162,32 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
     Xb = (X - ox) * c + (Y - oy) * s
     Yb = -(X - ox) * s + (Y - oy) * c
 
-    # --- fillets -------------------------------------------------------------
-    for i, sgn in enumerate((-1.0, +1.0)):
+    # --- fillets, one per land, each climbing along its own axis --------------
+    for i, l in enumerate(lands):
         starved = defect.kind == "insufficient" and defect.pad == i
-        x_toe = sgn * (d + pad_hx * 0.95)
-        x_term = sgn * body_hx + ox
-        run = abs(x_term - x_toe)
+        along_x = abs(l.ax) > abs(l.ay)
+        # toe at the outer edge of the land, termination at the body edge, which
+        # moves with the part when it is displaced
+        if along_x:
+            coord, perp = X, Y
+            toe = l.cx - l.ax * l.hx * 0.95   # toe sits just inside the land
+            term = -l.ax * body_hx + ox
+            perp_c, perp_h = l.cy, l.hy
+        else:
+            coord, perp = Y, X
+            toe = l.cy - l.ay * l.hy * 0.95
+            term = -l.ay * body_hy + oy
+            perp_c, perp_h = l.cx, l.hx
+        run = abs(term - toe)
         # Solve the climb height from the slope the joint should reach, rather
         # than from the body -- otherwise a tall package renders an 80 deg face
         # that overshoots every band and the test inverts.
         target = FILLET_SLOPE_STARVED_DEG if starved else FILLET_SLOPE_OK_DEG
         h = min(np.tan(np.radians(target)) * run / FILLET_POWER, 0.85 * pkg.body_h)
-        sl = _fillet_slope(X * sgn, x_toe * sgn, x_term * sgn, h, FILLET_POWER)
-        lo, hi = sorted((x_toe, x_term))
-        mask = (X >= lo) & (X <= hi) & (np.abs(Y) <= pad_hy * 0.92)
+        sl = _fillet_slope(coord, toe, term, h, FILLET_POWER)
+        lo, hi = sorted((toe, term))
+        mask = ((coord >= lo) & (coord <= hi)
+                & (np.abs(perp - perp_c) <= perp_h * 0.92))
         p.paint(mask, SOLDER, sl)
 
     # --- body ----------------------------------------------------------------
@@ -187,12 +200,26 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
         p.paint(body & _rect(Xb, Yb, mx, 0.0, body_hx * 0.20, body_hy * 0.88), MARKING)
 
     # --- bridge --------------------------------------------------------------
+    # Solder spanning one gap between neighbouring lands. On a chip there is only
+    # the one; on a lead row `defect.pad` picks which consecutive pair shorts.
     if defect.kind == "bridge":
-        g = pkg.pad_gap / 2.0
-        dome = np.clip(1.0 - (X / max(g, 1e-6)) ** 2, 0.0, 1.0)
-        sl = np.degrees(np.arctan(1.6 * np.abs(X) / max(g, 1e-6)))
-        mask = (np.abs(X) <= g) & (np.abs(Y) <= pad_hy * 0.55) & (dome > 0.02)
-        p.paint(mask, SOLDER, sl)
+        pairs = pkg.adjacent_pairs()
+        la, lb = pairs[defect.pad % len(pairs)]
+        along_x = abs(lb.cx - la.cx) >= abs(lb.cy - la.cy)
+        mid_x, mid_y = (la.cx + lb.cx) / 2.0, (la.cy + lb.cy) / 2.0
+        # half the clear space between the two lands, inner edge to inner edge,
+        # not half their centre spacing
+        if along_x:
+            g = max(abs(lb.cx - la.cx) / 2.0 - min(la.hx, lb.hx), 1e-6)
+            u, v = X - mid_x, Y - mid_y
+            hv = min(la.hy, lb.hy) * 0.55
+        else:
+            g = max(abs(lb.cy - la.cy) / 2.0 - min(la.hy, lb.hy), 1e-6)
+            u, v = Y - mid_y, X - mid_x
+            hv = min(la.hx, lb.hx) * 0.55
+        dome = np.clip(1.0 - (u / g) ** 2, 0.0, 1.0)
+        sl = np.degrees(np.arctan(1.6 * np.abs(u) / g))
+        p.paint((np.abs(u) <= g) & (np.abs(v) <= hv) & (dome > 0.02), SOLDER, sl)
     return p
 
 

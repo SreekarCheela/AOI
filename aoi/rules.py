@@ -22,8 +22,13 @@ ROT_SEARCH_DEG = tuple(float(d) for d in range(-24, 25, 3))
 
 FEATURE_NAMES = (
     "ncc", "dx_um", "dy_um", "dtheta_deg", "pol_margin", "body_contrast",
-    "contrast_ratio", "gap_spec", "band_low_0", "band_mid_0", "band_high_0",
-    "band_low_1", "band_mid_1", "band_high_1", "band_maha",
+    "contrast_ratio", "gap_spec",
+    # Band evidence has to be summarised, not listed per land: the vector is one
+    # fixed width for every package and a QFP has 32 terminals where a chip has
+    # 2. The worst land is what decides the component -- one bad joint fails the
+    # part -- and the mean says whether the whole part is off or just one lead.
+    "band_low_worst", "band_mid_worst", "band_high_worst",
+    "band_low_mean", "band_mid_mean", "band_high_mean", "band_maha",
     "body_area_ratio", "body_aspect", "body_shift_um", "body_clipped",
     "anomaly",
 )
@@ -41,7 +46,7 @@ class Measure:
     body_contrast: float = 0.0
     contrast_ratio: float = 1.0
     gap_spec: float = 0.0
-    bands: np.ndarray = field(default_factory=lambda: np.zeros((2, 3), np.float32))
+    bands: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), np.float32))
     band_maha: float = 0.0   # worst per-pad Mahalanobis distance from golden
     body_area_ratio: float = 1.0   # segmented body area / golden. 0 = no body
     body_aspect: float = 2.0       # body extent along the pad axis / its own width
@@ -49,10 +54,19 @@ class Measure:
     body_clipped: float = 0.0      # 1.0 if the blob runs into the crop edge
     anomaly: float = 0.0
 
+    def band_summary(self) -> tuple[float, ...]:
+        """Worst and mean band fraction per channel, over however many lands
+        this package has. Fixed width, so one feature vector serves a 2-pad chip
+        and a 32-lead QFP alike."""
+        if self.bands.size == 0:
+            return (float("nan"),) * 6
+        b = np.asarray(self.bands, np.float64)
+        return (*b.min(axis=0), *b.mean(axis=0))
+
     def vector(self) -> np.ndarray:
         return np.array([self.ncc, self.dx_um, self.dy_um, self.dtheta_deg,
                          self.pol_margin, self.body_contrast, self.contrast_ratio,
-                         self.gap_spec, *self.bands.ravel(), self.band_maha,
+                         self.gap_spec, *self.band_summary(), self.band_maha,
                          self.body_area_ratio, self.body_aspect,
                          self.body_shift_um, self.body_clipped,
                          self.anomaly], np.float32)
@@ -65,8 +79,8 @@ class GoldenPackage:
     body: np.ndarray                     # body window only -- see `body_template`
     body_180: np.ndarray
     body_mask: np.ndarray                # body footprint within `body`
-    band_mean: np.ndarray                # (2, 3)
-    band_std: np.ndarray                 # (2, 3), diagnostics and reporting only
+    band_mean: np.ndarray                # (n_lands, 3)
+    band_std: np.ndarray                 # (n_lands, 3), diagnostics only
                                          # -- the fillet decision uses band_cov_inv
     gap_mean: float
     gap_std: float
@@ -86,7 +100,7 @@ class GoldenPackage:
     # (2, 3, 3) regularised inverse covariance of the three band fractions, per
     # pad. Defaults to an uncorrelated matrix at the std floor so a hand-built
     # Golden still scores something sane rather than dividing by zero.
-    band_cov_inv: np.ndarray = field(
+    band_cov_inv: np.ndarray = field(   # (n_lands, 3, 3)
         default_factory=lambda: np.stack([np.eye(3) / config.BAND_COV_FLOOR ** 2] * 2))
 
     @property
@@ -105,28 +119,52 @@ class Golden:
 
 # ------------------------------------------------------------------ geometry
 def joint_boxes(pkg: Package) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Per-land fillet window: outer pad edge to body edge, where solder climbs."""
+    """Per-land fillet window: outer land edge to body edge, where solder climbs.
+
+    Built along each land's own axis, so a lead on the top row of a QFP gets a
+    window running downward into the body exactly as a chip's left land gets one
+    running right. For a two-terminal package this reproduces the original pair
+    of boxes exactly.
+    """
     out = []
-    d = pkg.pad_pitch / 2.0
-    for sgn in (-1.0, +1.0):
-        x_outer = sgn * (d + pkg.pad_l / 2.0)
-        x_inner = sgn * pkg.body_l / 2.0
-        out.append((np.array([(x_outer + x_inner) / 2.0, 0.0]),
-                    np.array([abs(x_outer - x_inner) / 2.0, pkg.pad_w / 2.0 * 0.92])))
+    for l in pkg.lands():
+        if abs(l.ax) > abs(l.ay):                      # land on a left/right row
+            p_out = l.cx - l.ax * l.hx                 # outer edge, away from body
+            p_in = -l.ax * pkg.body_l / 2.0            # body edge
+            out.append((np.array([(p_out + p_in) / 2.0, l.cy]),
+                        np.array([abs(p_out - p_in) / 2.0, l.hy * 0.92])))
+        else:                                          # top/bottom row
+            p_out = l.cy - l.ay * l.hy
+            p_in = -l.ay * pkg.body_w / 2.0
+            out.append((np.array([l.cx, (p_out + p_in) / 2.0]),
+                        np.array([l.hx * 0.92, abs(p_out - p_in) / 2.0])))
     return out
 
 
 # ------------------------------------------------------------- primitive tests
 def _norm(a: np.ndarray) -> np.ndarray:
+    """Scale to [0,1] if the input looks like 8-bit.
+
+    Empty-safe: every caller clips a window against the crop bounds and can end
+    up with nothing, and `max()` on an empty array raises. Guarding here rather
+    than at each of the three call sites, all of which checked the size only
+    after calling this.
+    """
     a = a.astype(np.float32)
+    if a.size == 0:
+        return a
     return a / 255.0 if a.max() > 1.5 else a
 
 
 def band_fractions(region: np.ndarray, pkg: Package,
                    shift_px: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
-    """Fraction of each fillet window lit in each angled ring -- the slope signature."""
-    out = np.zeros((2, 3), np.float32)
-    for i, (centre, half) in enumerate(joint_boxes(pkg)):
+    """Fraction of each fillet window lit in each angled ring -- the slope signature.
+
+    Returns (n_lands, 3). One row per terminal, so a chip gives 2 and a QFP 32.
+    """
+    boxes = joint_boxes(pkg)
+    out = np.zeros((len(boxes), 3), np.float32)
+    for i, (centre, half) in enumerate(boxes):
         c = centre + np.array([shift_px[0], shift_px[1]]) * config.MM_PER_PX
         ys, xs = roi.local_box_px(c, half, region.shape)
         win = _norm(region[ys, xs])
@@ -235,29 +273,38 @@ def _band_cov_inv(samples: np.ndarray) -> np.ndarray:
 def band_distance(bands: np.ndarray, g: "GoldenPackage") -> np.ndarray:
     """Mahalanobis distance of each pad's band triple from the golden mean.
 
-    Returns (2,), one distance per land. Scoring the three bands jointly rather
+    Returns one distance per land. Scoring the three bands jointly rather
     than one at a time is the whole point: anything that changes how much light
     reaches a component moves all three together, along the high-covariance axis
     where it costs almost no distance, while a starved joint loses the steep
     face but keeps the shallow one and moves across that axis where it costs a
     lot (spec section 5).
     """
-    out = np.zeros(2, np.float64)
-    for pad in range(2):
+    n = min(len(bands), len(g.band_mean))
+    out = np.zeros(n, np.float64)
+    for pad in range(n):
         d = bands[pad].astype(np.float64) - np.asarray(g.band_mean[pad], np.float64)
         out[pad] = float(np.sqrt(max(float(d @ g.band_cov_inv[pad] @ d), 0.0)))
     return out
 
 
 def gap_specular(region: np.ndarray, pkg: Package) -> float:
-    """Specular response between the lands -- substrate should be dark here."""
-    ys, xs = roi.local_box_px(np.array([0.0, 0.0]), roi.gap_rect(pkg), region.shape)
-    win = _norm(region[ys, xs])
-    if win.size == 0:
-        return 0.0
+    """Worst specular response in any gap between neighbouring lands.
+
+    Substrate should be dark there. A chip has one such gap; a lead row has one
+    per consecutive pair, and the worst of them is what decides the component,
+    because a single bridged pair shorts the part however clean the rest is.
+    """
     lo = config.CHANNELS.index("low")
     mid = config.CHANNELS.index("mid")
-    return float(np.maximum(win[..., lo], win[..., mid]).mean())
+    worst = 0.0
+    for centre, half in roi.gap_boxes(pkg):
+        ys, xs = roi.local_box_px(centre, half, region.shape)
+        win = _norm(region[ys, xs])
+        if win.size == 0:
+            continue
+        worst = max(worst, float(np.maximum(win[..., lo], win[..., mid]).mean()))
+    return worst
 
 
 def body_contrast(region: np.ndarray, pkg: Package) -> float:
@@ -471,7 +518,8 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
             body_mask=body_mask_for(body, pkg_obj),
             band_mean=bands.mean(axis=0),
             band_std=np.maximum(bands.std(axis=0), 0.01),
-            band_cov_inv=np.stack([_band_cov_inv(bands[:, pad, :]) for pad in range(2)]),
+            band_cov_inv=np.stack([_band_cov_inv(bands[:, pad, :])
+                                   for pad in range(bands.shape[1])]),
             gap_mean=float(np.mean(d["gap"])), gap_std=float(max(np.std(d["gap"]), 0.01)),
             contrast_mean=float(np.mean(d["con"])),
             contrast_std=float(max(np.std(d["con"]), 0.005)),

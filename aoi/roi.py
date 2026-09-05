@@ -25,19 +25,35 @@ def body_rect(pkg: Package) -> np.ndarray:
     return np.array([pkg.body_l / 2.0, pkg.body_w / 2.0])
 
 
-def pad_centres(pkg: Package) -> list[np.ndarray]:
-    """Component-local centres of the two lands."""
-    d = pkg.pad_pitch / 2.0
-    return [np.array([-d, 0.0]), np.array([+d, 0.0])]
+def land_boxes(pkg: Package) -> list[tuple[np.ndarray, np.ndarray]]:
+    """(centre, half-extent) of every land, component-local mm."""
+    return [(np.array([l.cx, l.cy]), np.array([l.hx, l.hy])) for l in pkg.lands()]
 
 
-def pad_rect(pkg: Package) -> np.ndarray:
-    return np.array([pkg.pad_l / 2.0, pkg.pad_w / 2.0])
+def gap_boxes(pkg: Package) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The regions between neighbouring lands -- where solder must NOT be.
 
-
-def gap_rect(pkg: Package) -> np.ndarray:
-    """The inter-pad region -- where solder must NOT be (bridge test)."""
-    return np.array([pkg.pad_gap / 2.0 * 0.8, pkg.pad_w / 2.0 * 0.8])
+    On a two-terminal part this is the single space across the body, which is
+    what the bridge test has always measured. On a lead row it is every
+    consecutive pair, and those gaps are the ones that actually bridge: a
+    0.8 mm-pitch QFP leaves ~0.4 mm between leads against ~6 mm across the body.
+    Shrunk to 80% so a fillet creeping to the very edge of its own land does not
+    count as solder in the gap.
+    """
+    out = []
+    for a, b in pkg.adjacent_pairs():
+        centre = np.array([(a.cx + b.cx) / 2.0, (a.cy + b.cy) / 2.0])
+        # the gap spans inner edge to inner edge along the line joining them,
+        # and is as wide as the narrower land across it
+        dx, dy = abs(b.cx - a.cx), abs(b.cy - a.cy)
+        if dx >= dy:
+            half = np.array([max(dx / 2.0 - min(a.hx, b.hx), 1e-3),
+                             min(a.hy, b.hy)])
+        else:
+            half = np.array([min(a.hx, b.hx),
+                             max(dy / 2.0 - min(a.hy, b.hy), 1e-3)])
+        out.append((centre, half * 0.8))
+    return out
 
 
 # ------------------------------------------------------------------- cropping

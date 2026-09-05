@@ -86,6 +86,47 @@ These are synthetic numbers. They prove the logic and the wiring are right; they
 say nothing about false call rate on real boards, which is what §8 of the spec
 is actually about.
 
+## Packages with more than two terminals
+
+Land geometry used to be a pair: two centres at ±`pad_pitch/2`, a bands array of
+shape `(2, 3)`, `for pad in range(2)` in the verdict. That put every IC,
+connector and QFP out of scope, which meant the pipeline could not run on a real
+assembly at all — passives are most of a board by count and none of what makes
+it work.
+
+Lands are now generated from row descriptors, and everything downstream indexes
+that list. A chip is the degenerate case of one land a side:
+
+| package | rows | per row | terminals | bridge gaps |
+|---|---|---|---|---|
+| 0402 … TANT-A | left, right | 1 | 2 | 1 |
+| SOT-23-6 | left, right | 3 | 6 | 4 |
+| SOIC-8 | left, right | 4 | 8 | 6 |
+| QFP-32 | all four | 8 | 32 | 28 |
+
+Three things needed a decision rather than just widening.
+
+**The feature vector cannot have per-land columns.** One fixed width has to
+serve a 2-pad chip and a 32-lead QFP, so the six `band_*_0` / `band_*_1` columns
+became worst-and-mean per channel. The worst land is what decides the component
+— one bad joint fails the part — and the mean says whether the whole part is off
+or just one lead.
+
+**A bridge is between neighbours, not across the body.** On a chip those are the
+same thing. On a lead row they are not, and the lead-to-lead gaps are the ones
+that actually bridge: a QFP-32 leaves ~0.4 mm between leads against 6.2 mm
+across the body. `gap_specular` now scores every consecutive pair and takes the
+worst.
+
+**The tombstone test has to be gated on two terminals.** Not for tidiness: a QFP
+body is square, so its extent along the pad axis equals its width and the
+standing-body test reads ~1.0. Ungated, every quad package on the board is
+flagged as a tombstone. Physically the gate is exact — a part needs exactly two
+terminals to stand up on one of them.
+
+Verified against the two-terminal path by hashing 50 rendered boards across
+every defect type before and after: **bit-for-bit identical**.
+
 ## Finding the body
 
 Presence used to be a correlation score. NCC answers one question -- does this
@@ -255,6 +296,29 @@ reason to develop on synthetic data first.
   the pipeline just corrected — which reads to an operator as a broken machine.
 - **Anomaly models are per package family, never global.** See above; this one
   costs an order of magnitude.
+- **A package library cannot be validated by synthetic data.** The renderer and
+  the inspector read the same numbers, so a package that disagrees with its
+  datasheet is perfectly self-consistent and every test passes. `SOIC-8` and
+  `SOT-23` both shipped here with body length and width swapped, which put the
+  leads on the short sides — geometrically valid, fillet run still positive, and
+  describing a part that does not exist. It cost more time than any other single
+  error. Two guards now: nominal dimensions pinned against the standards, and
+  the rule that a dual-row package spreads its leads along its *long* axis.
+- **Sanity-check package geometry, because a bad one disables a test silently.**
+  If the body reaches past its own land there is nothing for solder to climb:
+  the fillet window degenerates, every joint reads permanently starved, and the
+  fillet test is dead for that package. No exception, nothing that looks wrong
+  in the library — it surfaces only as a false-call rate. `Package.validate()`
+  now refuses it.
+- **A layout margin cannot be one number once parts differ in size.** A 0402
+  needs 1.1 mm of clearance and a QFP-32 needs 4.9 mm. Two failure modes, both
+  of which present as a board-wide false-call storm rather than an error: a
+  component whose metal reaches into a fiducial's ±2.5 mm search window can win
+  the alignment correlation and hand back a bogus transform that displaces every
+  crop on the board; and a component whose crop runs off the image gets
+  `BORDER_REPLICATE` fill, so the lands landing in that strip read as bare. Both
+  were found as a 64 % false-call rate on the first mixed board, and neither was
+  a pipeline bug.
 - **An unknown must not be representable as a bad reading.** `measure` returned
   early for a package teach never saw, leaving `ncc` at its 0.0 default — and
   0.0 is a real measurement, the one a totally wrong part scores. Every

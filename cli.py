@@ -33,8 +33,8 @@ INJECTABLE = ("missing", "offset", "skew", "reversed", "insufficient", "bridge",
 
 
 # --------------------------------------------------------------------- helpers
-def make_board(seed: int = 1) -> B.Board:
-    return B.random_board(40.0, 30.0, seed=seed)
+def make_board(seed: int = 1, mixed: bool = False) -> B.Board:
+    return B.mixed_board(seed) if mixed else B.random_board(40.0, 30.0, seed=seed)
 
 
 def golden_stacks(brd: B.Board, n: int, seed0: int = 100) -> list[np.ndarray]:
@@ -46,10 +46,16 @@ def random_defects(brd: B.Board, n: int, rng: random.Random) -> dict[str, synth.
     picks = rng.sample(brd.components, min(n, len(brd.components)))
     out: dict[str, synth.Defect] = {}
     for c in picks:
-        kinds = [k for k in INJECTABLE if k != "reversed" or c.pkg.polarized]
+        # Only a polarised part can be reversed, and only a two-terminal part can
+        # stand on one land. Injecting a tombstone into an eight-lead SOIC would
+        # render a perfectly good part and then count it as a miss.
+        kinds = [k for k in INJECTABLE
+                 if (k != "reversed" or c.pkg.polarized)
+                 and (k != "tombstone" or c.pkg.is_two_terminal)]
         k = rng.choice(kinds)
+        n_targets = c.pkg.n_pads if k != "bridge" else len(c.pkg.adjacent_pairs())
         out[c.refdes] = synth.Defect(
-            kind=k, pad=rng.randint(0, 1),
+            kind=k, pad=rng.randrange(max(1, n_targets)),
             dx=rng.choice([-1, 1]) * rng.uniform(0.18, 0.30) if k == "offset" else 0.0,
             dtheta=rng.choice([-1, 1]) * rng.uniform(15.0, 25.0) if k == "skew" else 0.0)
     return out
@@ -67,7 +73,7 @@ def _teach(brd: B.Board, n: int) -> rules.Golden:
 def cmd_demo(a: argparse.Namespace) -> None:
     OUT.mkdir(exist_ok=True)
     rng = random.Random(a.seed)
-    brd = make_board(a.board_seed)
+    brd = make_board(a.board_seed, getattr(a, "mixed", False))
     print(f"board {brd.name}: {brd.width:.0f} x {brd.height:.0f} mm, "
           f"{len(brd.components)} components, {len(brd.fiducials)} fiducials")
     print(f"sampling {config.UM_PER_PX:.0f} um/px -> "
@@ -366,6 +372,8 @@ def main() -> None:
     d.add_argument("--seed", type=int, default=7)
     d.add_argument("--board-seed", type=int, default=1)
     d.add_argument("--backend", default="none", choices=["none", "torch", "onnx"])
+    d.add_argument("--mixed", action="store_true",
+                   help="board with leaded parts (SOIC, SOT-23, QFP) as well as passives")
 
     s = sub.add_parser("dataset"); s.set_defaults(fn=cmd_dataset)
     s.add_argument("--boards", type=int, default=14)

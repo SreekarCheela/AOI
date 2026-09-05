@@ -42,12 +42,21 @@ MAX_SKEW_DEG: float = 12.0
 # alongside the body segmentation below. The old FAIL level tried to say "the
 # body is not on its footprint" and was retired when body localisation replaced
 # it -- correlation cannot say WHERE the body went, and that was the question.
-# ABSENT separates "no body at all" from "body present but walked off its
-# lands". The window here is genuinely narrow - SOD-123 missing scores 0.572 and
-# an 0603 displaced 500 um scores 0.612 - so this value is doing more work than
-# a single number comfortably can. Re-derive it on real boards; see
-# tests/test_known_limits.py.
-NCC_ABSENT_FRACTION: float = 0.60
+# ABSENT is the second opinion the body segmentation is checked against before a
+# part is called missing. It is reached ONLY when the segmentation found no body
+# at all, so the question it answers is narrow: does correlation still see a good
+# part, meaning the segmentation failed rather than the part being absent?
+#
+# That is a wide window, which is why this is not the delicate number it once
+# was. Measured across every package: a genuinely missing part correlates at
+# 0.40 to 0.60 of golden, because the bare lands are there either way and on a
+# small-bodied package like SOT-23-6 they dominate the crop; a good part sits at
+# ~1.0. 0.78 leaves 30% clear of the missing population and 22% clear of good.
+#
+# It used to sit at 0.60 and separate "absent" from "walked off its lands", which
+# was a 0.572-to-0.612 window and far too tight to hold. Body localisation took
+# that job away: a displaced part still HAS a body, so it never reaches here.
+NCC_ABSENT_FRACTION: float = 0.78
 
 # ---- fillet grading ----------------------------------------------------------
 # Joint quality is scored as a Mahalanobis distance of the pad's three band
