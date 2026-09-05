@@ -12,10 +12,12 @@ These tests pin the replacement so it cannot drift back.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
-from aoi import config, rules, synth
+from aoi import config, pipeline, rules, synth
 from aoi.fusion import rule_verdict
 
 from conftest import render_with
@@ -157,3 +159,64 @@ def test_package_relative_gate_is_strictly_tighter_than_the_old_constant(golden)
         assert g.ncc_fail > config.NCC_FAIL_UNTAUGHT, (
             f"{name} gates at {g.ncc_fail:.3f}, no tighter than the old global "
             f"{config.NCC_FAIL_UNTAUGHT}; the fix has been undone")
+
+
+# --------------------------------------------------------------- gate headroom
+def test_good_parts_keep_real_headroom_against_the_gate(brd, golden):
+    """The gate must not sit close to the good-part distribution.
+
+    Measured over fresh boards rather than the teach set, because teach
+    understates the spread badly: the worst good 0402 sits 7.4 teach-sigma below
+    the golden mean, and the true spread runs up to 2.2x the teach estimate. A
+    threshold placed off teach statistics alone would look safe and not be.
+    """
+    worst = 0.0
+    for seed in (5001, 5002, 5003, 5004, 5005):
+        stack = synth.render(brd, opts=synth.RenderOpts(seed=seed))
+        stack, _, _ = pipeline.align_board(stack, brd)
+        for c in brd.components:
+            m = rules.measure(stack, c, golden)
+            worst = max(worst, golden.packages[c.package].ncc_fail / max(m.ncc, 1e-9))
+    assert worst < 0.88, (
+        f"the closest good part came within {(1 - worst) * 100:.0f}% of tripping "
+        "the presence gate; that is where false calls start")
+
+
+def test_the_gate_is_not_lopsided(golden):
+    """The threshold sits between two populations and should be roughly centred.
+
+    Being generous on one side buys nothing and costs the other. The old 0.85
+    ran 12% against false calls and 25% against missed detections, which is
+    detection margin nobody asked for paid for with headroom that was needed.
+    """
+    # 0402 tombstone is the highest-scoring defect whose LABEL depends on this
+    # gate firing, so it is the real lower bound. Measured at 0.638 of golden.
+    lower, upper = 0.638, 0.961
+    f = config.NCC_FAIL_FRACTION
+    assert lower < f < upper, \
+        f"NCC_FAIL_FRACTION {f} is outside the usable window [{lower}, {upper}]"
+
+    headroom = (upper - f) / upper
+    detection = (f - lower) / f
+    assert headroom > 0.15, f"only {headroom:.0%} headroom against false calls"
+    assert detection > 0.15, f"only {detection:.0%} margin against missed detections"
+    assert 0.5 < headroom / detection < 2.0, (
+        f"lopsided: {headroom:.0%} headroom vs {detection:.0%} detection margin")
+
+
+def test_a_wide_spread_package_gets_a_looser_gate(golden):
+    """The sigma safety net.
+
+    Inert on synthetic data, where teach std runs 0.0008 to 0.0125 and the
+    fraction always binds. It exists for a real package whose correlation
+    genuinely scatters, where a fixed fraction would put the gate inside the
+    good distribution. Whichever rule is looser has to win.
+    """
+    tight = replace(next(iter(golden.packages.values())), ncc_mean=0.95, ncc_std=0.002)
+    wide = replace(tight, ncc_std=0.05)
+
+    assert tight.ncc_fail == pytest.approx(0.95 * config.NCC_FAIL_FRACTION), \
+        "with a narrow spread the fraction should bind"
+    assert wide.ncc_fail < tight.ncc_fail, (
+        f"a package scattering at std=0.05 gates at {wide.ncc_fail:.3f}, no "
+        f"looser than one at std=0.002 ({tight.ncc_fail:.3f})")

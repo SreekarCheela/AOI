@@ -74,8 +74,15 @@ class GoldenPackage:
 
     @property
     def ncc_fail(self) -> float:
-        """Below this, the body is not on its footprint."""
-        return self.ncc_mean * config.NCC_FAIL_FRACTION
+        """Below this, the body is not on its footprint.
+
+        Whichever of the two rules gives the LOOSER gate wins. The fraction is
+        the normal case; the sigma term only takes over for a package whose
+        correlation genuinely varies more than the fraction allows for, where a
+        wider spread means the gate needs more room, not less.
+        """
+        return min(self.ncc_mean * config.NCC_FAIL_FRACTION,
+                   self.ncc_mean - config.NCC_FAIL_SIGMA * self.ncc_std)
 
     @property
     def ncc_absent(self) -> float:

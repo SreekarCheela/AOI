@@ -188,6 +188,21 @@ reason to develop on synthetic data first.
   the pipeline just corrected — which reads to an operator as a broken machine.
 - **Anomaly models are per package family, never global.** See above; this one
   costs an order of magnitude.
+- **Place a threshold at the midpoint of the window it has to sit in, and
+  measure both edges.** The presence gate ran a fixed 0.85 of golden, which gave
+  12 % headroom against false calls and 25 % against missed detections: margin
+  nobody needed, paid for with margin that was running out. The window is
+  0.638 (the best-scoring defect whose *label* depends on the gate firing) to
+  0.961 (the worst a good part scored over fresh boards), so the midpoint is
+  0.78 and both sides get ~18 %. Measure the upper edge on boards the teach set
+  never saw: teach understates the spread by up to 2.2x, and the worst good 0402
+  sits 7.4 teach-sigma below the golden mean.
+- **Only count constraints that change a verdict.** SOD-123 and TANT-A
+  tombstones score 0.81 and 0.77 and look like a far tighter lower bound than
+  the 0.638 above. They are not: they fall through to the same label whether the
+  gate fires or not, so honouring them would have shrunk the window by half in
+  exchange for no behaviour at all. Check what a threshold actually decides
+  before letting it constrain you.
 - **The presence threshold is a fraction of golden, never an absolute number.**
   Golden NCC is a property of the package, not the machine: an 0603 matches its
   own template at 0.92, a SOD-123 at 0.99. One global constant therefore lands
@@ -252,6 +267,12 @@ stays on the workstation.
   Separating them needs a measurement that tells a standing body from a
   displaced one, not another threshold. Chips — where tombstoning actually
   happens — discriminate correctly on both pads.
+- NCC cannot separate "no body at all" from "body walked off its lands". The
+  two populations overlap across packages: a missing part reaches 0.572 of
+  golden (SOD-123) while a part displaced 500 um falls to 0.505 (0603), so no
+  threshold sits between them and a gross displacement reads "missing" on chips.
+  Separating them needs a measurement that finds the body somewhere else on the
+  crop. Both still fail the board; only the label is wrong.
 - A package the golden set never covered flags every instance of it as
   "missing", because `measure` returns before scoring NCC and the untaught
   branch reads the 0.0 default as an absent part. On a real board that is a

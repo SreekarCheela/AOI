@@ -62,14 +62,19 @@ def test_tall_polarised_tombstone_still_fails_the_board(brd, golden, refdes, pac
 
 
 @pytest.mark.xfail(strict=False, reason=(
-    "A gross 500 um displacement is named by whichever gross-fault test reaches "
-    "it first, which is not always the placement test. On an 0402 the body ends "
-    "up over the inter-pad gap and the specular reading there trips the bridge "
-    "test, which runs first by design because a bridge wrecks every other "
-    "measurement. On an 0805 both joints go dead and the body correlation drops "
-    "below the absent threshold, so it reads 'missing'. Every case still fails "
-    "the board; only the label is wrong."))
-@pytest.mark.parametrize("refdes,package", [("R1", "0402"), ("R5", "0805")])
+    "NCC cannot separate 'no body at all' from 'body walked off its lands', "
+    "because the two populations overlap ACROSS packages. Sampled over four "
+    "components and three seeds per package: a missing part reaches 0.572 of "
+    "golden (SOD-123) while a part displaced 500 um falls to 0.505 (0603). No "
+    "value of NCC_ABSENT_FRACTION sits between those, so on chips a gross "
+    "displacement reads 'missing'. On an 0402 it does not even get that far - "
+    "the body ends up over the inter-pad gap and trips the bridge test, which "
+    "runs first by design because a bridge wrecks every other measurement. "
+    "Separating these needs a measurement that sees the body somewhere else on "
+    "the crop, not a better threshold. Every case still fails the board; only "
+    "the label is wrong."))
+@pytest.mark.parametrize("refdes,package",
+                         [("R1", "0402"), ("R3", "0603"), ("R5", "0805")])
 def test_gross_displacement_is_labelled_offset(brd, golden, refdes, package):
     stack = render_with(brd, {refdes: synth.Defect("offset", dx=0.50)})
     m = rules.measure(stack, brd.by_refdes(refdes), golden)

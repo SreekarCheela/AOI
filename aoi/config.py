@@ -43,7 +43,37 @@ MAX_SKEW_DEG: float = 12.0
 #   ABSENT -- there is no body in the window at all
 # A part between them has moved but is still present, which is a placement
 # fault, so it falls through to the offset and skew tests to be named properly.
-NCC_FAIL_FRACTION: float = 0.85
+# FAIL is placed at the geometric midpoint of the window measured between the
+# two things it has to separate, so the margin is even on both sides rather than
+# generous on one and thin on the other:
+#
+#   upper bound 0.961  the worst a GOOD part scored over 15 fresh boards (0805)
+#   lower bound 0.638  the best a defect scored whose LABEL depends on this gate
+#                      firing (0402 tombstone)
+#
+# sqrt(0.638 x 0.961) = 0.783, giving ~18% headroom each way. The previous 0.85
+# sat at 12% against false calls and 25% against missed detections; the gate was
+# paying for detection margin it did not need with headroom it did.
+#
+# Only defects whose label actually changes belong in that lower bound. SOD-123
+# and TANT-A tombstones score 0.81 and 0.77 and look like a much tighter
+# constraint, but they fall through to the same verdict whether the gate fires
+# or not, so including them would shrink the window to nothing in exchange for
+# no behaviour at all.
+NCC_FAIL_FRACTION: float = 0.78
+
+# Safety net for a package whose correlation genuinely varies more than teach
+# suggests. Inert on synthetic data - teach std runs 0.0008 to 0.0125, so the
+# fraction always binds - and it engages once a package's spread passes about
+# 0.026, which real boards may well do. Whichever gives the LOOSER gate wins,
+# because a wide spread means more room is needed, not less.
+NCC_FAIL_SIGMA: float = 8.0
+
+# ABSENT separates "no body at all" from "body present but walked off its
+# lands". The window here is genuinely narrow - SOD-123 missing scores 0.572 and
+# an 0603 displaced 500 um scores 0.612 - so this value is doing more work than
+# a single number comfortably can. Re-derive it on real boards; see
+# tests/test_known_limits.py.
 NCC_ABSENT_FRACTION: float = 0.60
 
 # A tombstone stands on one land with that joint fully formed; the other land is
