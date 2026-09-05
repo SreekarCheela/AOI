@@ -19,9 +19,10 @@ from aoi import pipeline, synth
 # known-good part instead.
 INJECTED = {
     "R1": ("missing", synth.Defect("missing")),
-    # pad=1 deliberately: a 0402 tombstone on pad 0 clears the 0.62 presence gate
-    # and is mislabelled as skew. Tracked in test_known_limits.py.
-    "R2": ("tombstone", synth.Defect("tombstone", pad=1)),
+    # pad 0 specifically: this is the case that used to clear the old global
+    # 0.62 presence gate and come back as "skew". It stays here as the e2e
+    # guard for that fix.
+    "R2": ("tombstone", synth.Defect("tombstone", pad=0)),
     "R3": ("offset", synth.Defect("offset", dx=0.25)),
     "R4": ("insufficient", synth.Defect("insufficient", pad=1)),
     "R5": ("skew", synth.Defect("skew", dtheta=20.0)),

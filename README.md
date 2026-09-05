@@ -133,6 +133,22 @@ reason to develop on synthetic data first.
   the pipeline just corrected — which reads to an operator as a broken machine.
 - **Anomaly models are per package family, never global.** See above; this one
   costs an order of magnitude.
+- **The presence threshold is a fraction of golden, never an absolute number.**
+  Golden NCC is a property of the package, not the machine: an 0603 matches its
+  own template at 0.92, a SOD-123 at 0.99. One global constant therefore lands
+  inside one package's defect distribution while being unreachable for another.
+  At the old `ncc < 0.62`, a tombstoned 0402 scored 0.599 when one land survived
+  and 0.647 when the other did, so which pad happened to survive decided whether
+  the fault was found — and the pad that cleared the gate came back "skew" off a
+  spurious rotation peak. Gate on a fraction of what teach measured for that
+  package instead.
+- **Failing the presence gate does not say which fault it is.** It only says the
+  body is not on its footprint. A part that walked off its lands has a low NCC
+  and a dead joint too, exactly like a tombstone. What separates them is that a
+  tombstone's surviving joint is *fully formed* — the part really is soldered,
+  at one end — while a displaced part has both joints compromised. Name the
+  fault from the joints; let anything else fall through to the placement tests,
+  or a placement fault gets reported as a reflow fault.
 - **Backfill the anomaly column before fitting fusion.** `dataset` builds feature
   vectors before any model exists, so that column is zeros on disk. Fit on it
   as-is and the anomaly score contributes literally nothing — its reported
@@ -163,10 +179,21 @@ stays on the workstation.
 ## Known limits
 
 - Two-terminal packages only. Multi-lead parts need per-lead ROI generation.
-- Tombstone/missing discrimination degrades on packages whose body nearly covers
-  the lands (e.g. TANT-A), where the fillet window is only ~0.2 mm wide. Both
-  route to the same operator action. Chips — where tombstoning actually
-  happens — discriminate correctly.
+- Tombstones on tall polarised packages (TANT-A, SOD-123) are mislabelled, not
+  merely confused with "missing" as this used to claim. The body nearly covers
+  the lands, leaving a fillet window ~0.2 mm wide, so the surviving joint reads
+  only ~43 % of golden and never looks like a formed joint. Pad 1 additionally
+  flips the polarity margin and comes back "reversed". Both still fail the
+  board, so nothing escapes; the operator is sent to the wrong process fix.
+  Separating them needs a measurement that tells a standing body from a
+  displaced one, not another threshold. Chips — where tombstoning actually
+  happens — discriminate correctly on both pads.
+- A package the golden set never covered flags every instance of it as
+  "missing", because `measure` returns before scoring NCC and the untaught
+  branch reads the 0.0 default as an absent part. On a real board that is a
+  false-call storm for any package the teach boards happened not to carry. The
+  fix is a verdict state meaning "untestable", which the rule layer does not
+  have yet.
 - The subspace anomaly model assumes patches stay well canonicalised. Real
   boards vary more than synthetic ones; if separation degrades, EfficientAD with
   a pretrained teacher is the upgrade path, not a bigger autoencoder.

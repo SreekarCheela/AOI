@@ -63,6 +63,18 @@ class GoldenPackage:
     gap_std: float
     contrast_mean: float
     contrast_std: float
+    ncc_mean: float = 1.0                # how well a GOOD part of this package
+    ncc_std: float = 0.0                 # matches its own golden body template
+
+    @property
+    def ncc_fail(self) -> float:
+        """Below this, the body is not on its footprint."""
+        return self.ncc_mean * config.NCC_FAIL_FRACTION
+
+    @property
+    def ncc_absent(self) -> float:
+        """Below this, there is no body in the window at all."""
+        return self.ncc_mean * config.NCC_ABSENT_FRACTION
 
 
 @dataclass
@@ -269,6 +281,14 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
         bands = np.stack(d["band"])
         pkg_obj = packages_for[name]
         body = body_template(tpl, pkg_obj)
+
+        # How well does a KNOWN-GOOD part of this package match its own template?
+        # Presence is gated on a fraction of this rather than a global constant,
+        # so the same rule means the same thing on an 0603 (golden ~0.92) and a
+        # SOD-123 (~0.99). Measured here because teach is the only place the
+        # good-part distribution exists.
+        nccs = [_match(t, body)[0] for t in d["tpl"] if t.shape == shp]
+
         out.packages[name] = GoldenPackage(
             template=tpl,
             template_180=np.ascontiguousarray(np.rot90(tpl, 2)),
@@ -280,5 +300,7 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
             gap_mean=float(np.mean(d["gap"])), gap_std=float(max(np.std(d["gap"]), 0.01)),
             contrast_mean=float(np.mean(d["con"])),
             contrast_std=float(max(np.std(d["con"]), 0.005)),
+            ncc_mean=float(np.mean(nccs)) if nccs else 1.0,
+            ncc_std=float(np.std(nccs)) if nccs else 0.0,
         )
     return out

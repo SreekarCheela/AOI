@@ -32,6 +32,30 @@ BAND_THRESHOLD: float = 0.35    # normalised intensity counted as "lit" in a cha
 MAX_OFFSET_UM: float = 150.0
 MAX_SKEW_DEG: float = 12.0
 
+# ---- presence gating ---------------------------------------------------------
+# Body correlation is scored against the golden mean for that package, never a
+# global constant. Golden NCC is a property of the package, not the machine: an
+# 0603 sits at 0.92 while a SOD-123 sits at 0.99, so one absolute threshold
+# cannot mean "the body has moved" for both. A fraction of the taught mean does.
+#
+# The two levels answer different questions, which is why the gate needs both:
+#   FAIL   -- the body is not on its footprint (moved, stood up, or gone)
+#   ABSENT -- there is no body in the window at all
+# A part between them has moved but is still present, which is a placement
+# fault, so it falls through to the offset and skew tests to be named properly.
+NCC_FAIL_FRACTION: float = 0.85
+NCC_ABSENT_FRACTION: float = 0.60
+
+# A tombstone stands on one land with that joint fully formed; the other land is
+# bare. A part that merely walked off its pads has BOTH joints degraded. This is
+# the fraction of the golden low-angle band the surviving joint must still reach
+# for "stood up" to beat "displaced".
+TOMBSTONE_SURVIVING_BAND: float = 0.75
+
+# Used only before any golden model exists (rule layer running from a cold
+# start). Package-relative gating is not available then.
+NCC_FAIL_UNTAUGHT: float = 0.62
+
 DEFECT_CLASSES: tuple[str, ...] = (
     "ok", "missing", "offset", "skew", "reversed", "insufficient", "bridge", "tombstone",
 )

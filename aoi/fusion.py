@@ -54,14 +54,46 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
         return V("reversed", 1.0 + abs(m.pol_margin),
                  f"180 deg template wins by {abs(m.pol_margin):.3f}")
 
-    # 3. presence. Both joints starved means nothing was ever placed; one joint
-    #    still wetted means a part is there but stood up.
-    if m.ncc < 0.62:
-        collapsed = 2
-        if g is not None:
-            collapsed = int(sum(m.bands[i, 0] < 0.30 * g.band_mean[i, 0] for i in range(2)))
-        kind = "missing" if collapsed >= 2 else "tombstone"
-        return V(kind, 1.0 - m.ncc, f"NCC {m.ncc:.2f}, {collapsed}/2 joints unwetted")
+    # 3. presence.
+    #
+    #    The gate is a fraction of what a good part of THIS package scores
+    #    against its own golden template, never a global constant. Golden NCC is
+    #    a property of the package: 0.92 on an 0603, 0.99 on a SOD-123. A single
+    #    absolute threshold lands in the middle of one package's defect
+    #    distribution while being unreachable for another -- at 0.62 a
+    #    tombstoned 0402 read 0.599 on one pad and 0.647 on the other, so which
+    #    land survived decided whether the fault was found.
+    #
+    #    Failing the gate only says the body is not on its footprint. Which
+    #    fault that is comes from the joints, not from the correlation score:
+    #
+    #      neither joint wetted, no body       -> nothing was placed
+    #      one joint fully formed, one bare    -> the part stood up
+    #      anything else                       -> it moved; let offset/skew name it
+    #
+    #    That last line is the one that matters. A part which walked off its
+    #    lands has both joints degraded and a low NCC, and it is a placement
+    #    fault, not a reflow fault. Naming it here would send the operator to
+    #    the wrong process fix, so it falls through on purpose.
+    if g is not None:
+        if m.ncc < g.ncc_fail:
+            unwetted = [m.bands[i, 0] < 0.30 * g.band_mean[i, 0] for i in range(2)]
+            n_unwetted = int(sum(unwetted))
+            surviving = max(m.bands[i, 0] / max(g.band_mean[i, 0], 1e-6)
+                            for i in range(2))
+            sev = 1.0 - m.ncc / max(g.ncc_mean, 1e-6)
+
+            if n_unwetted == 2 and m.ncc < g.ncc_absent:
+                return V("missing", sev,
+                         f"NCC {m.ncc:.2f} vs golden {g.ncc_mean:.2f}, neither joint wetted")
+            if n_unwetted == 1 and surviving >= config.TOMBSTONE_SURVIVING_BAND:
+                return V("tombstone", sev,
+                         f"NCC {m.ncc:.2f} vs golden {g.ncc_mean:.2f}, "
+                         f"one joint at {surviving:.0%} of golden, one bare")
+    elif m.ncc < config.NCC_FAIL_UNTAUGHT:
+        # No golden model yet, so nothing is package-relative and the joint
+        # evidence has no reference to be compared against.
+        return V("missing", 1.0 - m.ncc, f"NCC {m.ncc:.2f}, untaught package")
 
     # 4. placement
     off = float(np.hypot(m.dx_um, m.dy_um))
