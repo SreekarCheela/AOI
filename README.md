@@ -37,6 +37,9 @@ enough to run on a Pi.
 | `cli.py train` | anomaly autoencoder + classifier + fusion tree |
 | `cli.py export` | write ONNX for deployment |
 | `cli.py bench` | torch vs onnx parity and throughput |
+| `cli.py demo --save` | inspect and record to the local station log |
+| `cli.py review` | operator review screen for the last board |
+| `cli.py yield` | per-package false call rate and review time |
 
 `demo` takes `--backend none|torch|onnx`. The rule layer works with `none`, so
 the pipeline is useful before anything is trained.
@@ -85,6 +88,59 @@ face that overshoots every band and inverts the test.
 These are synthetic numbers. They prove the logic and the wiring are right; they
 say nothing about false call rate on real boards, which is what §8 of the spec
 is actually about.
+
+## The operator station
+
+The spec calls the review screen the product, and it is blunt about why: rules
+alone plateau at 3–8 % false calls, and operator labels are what take it under
+1 %. None of that can start until the labels are being stored, so the record
+matters more than the screen on top of it.
+
+```
+inspect ──▶ SQLite ──▶ review screen ──▶ adjudication ──▶ labelled crop
+                                                              │
+                                          false-call filter ◀──┘  (§6C)
+```
+
+`aoi/store.py` is the local record: one SQLite file, no network in the loop, as
+§5 requires. Boards, per-component verdicts, the feature vector, and a crop for
+everything that failed or could not be tested — not for all 500 good components,
+which would be storing the same picture of a correct 0402 several hundred times
+a board. `export_labels()` hands back `(patches, labels, packages)` with 1 = real
+defect and 0 = false call: naturally balanced, because it only ever contains
+components the rule layer already flagged.
+
+`aoi/review.py` is the screen. Native desktop, Tk from the standard library, so
+the Pi image stays small. The design follows from the §10 exit criterion — an
+operator clears a board's fails in under sixty seconds — which makes it a
+keyboard target, not a mouse one:
+
+- the flagged part beside a known-good one of the same package, because deciding
+  from the crop alone is guessing
+- false colour, low→red mid→green high→blue, the view where a starved joint is
+  obvious: it has lost its red
+- the measurement that triggered the call, in words
+- **D** real defect, **F** false call, **S** skip. Skip means undecided, never
+  silently good.
+
+A coverage gap is reported apart from defects and never enters the queue: a
+component with no inspection program is a gap in the program, not a fault on the
+board, and mixing them is how one unprogrammed package buries the real fails.
+
+Measured on a 54-component board with 12 fails: **12 labelled crops exported,
+40 s of operator time**, against the 60 s target. Per package:
+
+```
+package      seen  flagged  judged  false  real     FCR   review
+0402           18        4       4      1     3   5.56%     3.1s
+0603           13        4       4      1     3   7.69%     3.1s
+0805            9        2       2      0     2   0.00%     3.6s
+ALL            54       12      12      2    10   3.70%
+```
+
+Escape rate is deliberately absent. It can only be measured against a
+periodically hand-inspected sample, which is an input the station does not have,
+and inventing a number for it would be worse than leaving the column empty.
 
 ## Packages with more than two terminals
 

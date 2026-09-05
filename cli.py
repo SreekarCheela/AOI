@@ -6,6 +6,9 @@
     python cli.py train                 train anomaly + classifier + fusion
     python cli.py export                write ONNX for the Pi
     python cli.py bench                 torch vs onnx parity and timing
+    python cli.py demo --save           inspect and record to the station log
+    python cli.py review                operator review screen for the last board
+    python cli.py yield                 per-package false call rate and review time
     python cli.py shots --dir photos/   turn real photographs into a channel stack
 
 Train on the workstation, run `export`, copy out/models to the Pi, then run
@@ -25,10 +28,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from aoi import board as B                     # noqa: E402
-from aoi import capture, config, fusion, models, pipeline, roi, rules, synth  # noqa: E402
+from aoi import capture, config, fusion, models, pipeline, roi, rules, store, synth  # noqa: E402
 
 OUT = Path("out")
 MODELS = OUT / "models"
+DB = OUT / "station.db"
 INJECTABLE = ("missing", "offset", "skew", "reversed", "insufficient", "bridge", "tombstone")
 
 
@@ -122,6 +126,26 @@ def cmd_demo(a: argparse.Namespace) -> None:
         print(f"{mark}{v.refdes:7}{v.package:10}{inj:14}{v.reason:14}{v.score:7.2f}  {v.detail}")
     for r in sorted(missed):
         print(f"?{r:7}{'':10}{defects[r].kind:14}{'MISSED':14}")
+
+    if getattr(a, "save", False):
+        with store.Store(DB) as st:
+            # One reference patch per package, from the golden scans, so review
+            # can show the operator what correct looks like alongside the fail.
+            gs = golden_stacks(brd, a.golden)
+            refs = {}
+            for c in brd.components:
+                if c.package in refs:
+                    continue
+                refs[c.package] = np.median(
+                    np.stack([roi.extract_patch(g, c, c.pkg) for g in gs]),
+                    axis=0).astype(np.uint8)
+            st.save_golden(refs)
+            patches = np.stack([roi.extract_patch(res.aligned, c, c.pkg)
+                                for c in brd.components])
+            bid = st.save_result(brd, res, patches, serial=a.serial)
+            n = len(st.review_queue(bid))
+        print(f"\nsaved board {bid} to {DB}: {n} components queued for review")
+        print(f"  review them with:  python cli.py review")
 
     pipeline.defect_map(stack, brd, res, str(OUT / "defect_map.png"))
     pipeline.channel_strip(stack, str(OUT / "channels.png"))
@@ -361,6 +385,58 @@ def cmd_shots(a: argparse.Namespace) -> None:
     print("pad out to the component. A starved joint loses the red.")
 
 
+# ---------------------------------------------------------------------- review
+def cmd_review(a: argparse.Namespace) -> None:
+    """Open the operator review screen on the most recent board."""
+    from aoi import review
+    with store.Store(DB) as st:
+        board = st.latest_board()
+        if board is None:
+            print(f"No inspections in {DB}. Run:  python cli.py demo --save")
+            return
+        bid = a.board or board["id"]
+        queue = st.review_queue(bid)
+        gaps = st.untestable(bid)
+        print(f"board {bid} ({board['name']}): {len(queue)} to review, "
+              f"{len(gaps)} not inspected")
+        if not queue:
+            print("nothing queued -- every fail on this board is already adjudicated")
+            return
+        review.ReviewApp(st, bid, operator=a.operator).run()
+        secs = st.board_review_seconds(bid)
+        left = len(st.review_queue(bid))
+        print(f"adjudicated {len(queue) - left} of {len(queue)} in {secs:.0f} s "
+              f"({'under' if secs < 60 else 'OVER'} the 60 s target)")
+
+
+# ----------------------------------------------------------------------- yield
+def cmd_yield(a: argparse.Namespace) -> None:
+    """The numbers section 8 says to track, per package."""
+    with store.Store(DB) as st:
+        rows = st.yield_metrics()
+        if not rows:
+            print(f"No inspections in {DB}. Run:  python cli.py demo --save")
+            return
+        print(f"{'package':10}{'seen':>7}{'flagged':>9}{'not insp':>10}"
+              f"{'judged':>8}{'false':>7}{'real':>6}{'FCR':>8}{'review':>9}")
+        for r in rows:
+            rev = f"{r['avg_review_s']:.1f}s" if r["avg_review_s"] else "-"
+            print(f"{r['package']:10}{r['inspected']:7}{r['flagged']:9}"
+                  f"{r['untestable']:10}{r['adjudicated']:8}{r['false_calls']:7}"
+                  f"{r['defects']:6}{100 * r['false_call_rate']:7.2f}%{rev:>9}")
+        tot = sum(r["inspected"] for r in rows)
+        fc = sum(r["false_calls"] for r in rows)
+        adj = sum(r["adjudicated"] for r in rows)
+        print(f"\n{'ALL':10}{tot:7}{sum(r['flagged'] for r in rows):9}"
+              f"{sum(r['untestable'] for r in rows):10}{adj:8}{fc:7}"
+              f"{sum(r['defects'] for r in rows):6}{100 * fc / max(tot, 1):7.2f}%")
+        if adj == 0:
+            print("\nNo adjudications yet, so false call rate is not yet meaningful:")
+            print("the machine has an opinion and nobody has checked it.")
+            print("Run:  python cli.py review")
+        print("\nEscape rate needs a hand-inspected sample and is not derivable here.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -372,6 +448,9 @@ def main() -> None:
     d.add_argument("--seed", type=int, default=7)
     d.add_argument("--board-seed", type=int, default=1)
     d.add_argument("--backend", default="none", choices=["none", "torch", "onnx"])
+    d.add_argument("--save", action="store_true",
+                   help="record the inspection in the local SQLite station log")
+    d.add_argument("--serial", default=None, help="board serial from the scanner")
     d.add_argument("--mixed", action="store_true",
                    help="board with leaded parts (SOIC, SOT-23, QFP) as well as passives")
 
@@ -390,6 +469,12 @@ def main() -> None:
 
     b = sub.add_parser("bench"); b.set_defaults(fn=cmd_bench)
     b.add_argument("--n", type=int, default=256)
+
+    rv = sub.add_parser("review"); rv.set_defaults(fn=cmd_review)
+    rv.add_argument("--board", type=int, default=None, help="board id (default: latest)")
+    rv.add_argument("--operator", default="", help="who is reviewing")
+
+    y = sub.add_parser("yield"); y.set_defaults(fn=cmd_yield)
 
     sh = sub.add_parser("shots"); sh.set_defaults(fn=cmd_shots)
     sh.add_argument("--dir", default="photos", help="folder of low/mid/high[/diffuse] frames")
