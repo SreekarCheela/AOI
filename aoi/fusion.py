@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config
-from .rules import FEATURE_NAMES, Golden, Measure
+from .rules import FEATURE_NAMES, Golden, Measure, band_distance
 
 
 @dataclass
@@ -102,14 +102,34 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
     if abs(m.dtheta_deg) > config.MAX_SKEW_DEG:
         return V("skew", abs(m.dtheta_deg) / config.MAX_SKEW_DEG, f"{m.dtheta_deg:+.1f} deg")
 
-    # 5. joint quality -- only now is the fillet window trustworthy
+    # 5. joint quality -- only now is the fillet window trustworthy.
+    #
+    #    Scored as a Mahalanobis distance of the pad's three band fractions from
+    #    the golden distribution, not as a z-score on the low band alone. The
+    #    bands are correlated at r = 0.5 to 0.85 on good joints, and that is what
+    #    makes the joint test work: anything changing how much light reaches the
+    #    part -- vignetting, a dim corner, LED drift, a different board finish --
+    #    moves all three together along the high-covariance axis and costs almost
+    #    no distance, while a starved joint loses the steep face but keeps the
+    #    shallow one and moves across that axis, where it costs a lot. A
+    #    univariate test cannot separate those two, which is why illumination
+    #    non-uniformity is the largest single source of false calls in a rule
+    #    layer. It was also the only source of them here: 3 of 3, measured over
+    #    1080 good-component inspections.
     if g is not None:
+        dist = band_distance(m.bands, g)
         for pad in range(2):
-            obs, ref = m.bands[pad, 0], g.band_mean[pad, 0]
-            std = max(g.band_std[pad, 0], 1e-3)
-            if obs < ref - 3.0 * std:
-                return V("insufficient", (ref - obs) / std / 3.0,
-                         f"pad {pad} low-angle band {obs:.2f} vs {ref:.2f}")
+            # One-sided on purpose. Mahalanobis distance is symmetric, so a joint
+            # carrying MORE solder than golden sits just as far from the mean as
+            # a starved one. Without this guard a heavy fillet gets reported as
+            # insufficient solder -- the opposite fault. Grading excess is a
+            # separate test that does not exist yet (spec section 5).
+            if dist[pad] > config.BAND_MAHALANOBIS_FAIL \
+                    and m.bands[pad, 0] < g.band_mean[pad, 0]:
+                return V("insufficient", dist[pad] / config.BAND_MAHALANOBIS_FAIL,
+                         f"pad {pad} fillet d={dist[pad]:.1f} from golden, "
+                         f"low-angle band {m.bands[pad, 0]:.2f} vs "
+                         f"{g.band_mean[pad, 0]:.2f}")
 
     return Verdict(m.refdes, m.package, False, 0.0, "ok")
 

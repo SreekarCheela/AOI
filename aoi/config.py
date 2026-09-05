@@ -52,6 +52,46 @@ NCC_ABSENT_FRACTION: float = 0.60
 # for "stood up" to beat "displaced".
 TOMBSTONE_SURVIVING_BAND: float = 0.75
 
+# ---- fillet grading ----------------------------------------------------------
+# Joint quality is scored as a Mahalanobis distance of the pad's three band
+# fractions from the golden distribution for that package (spec section 5),
+# not as a per-band z-score.
+#
+# The three bands are strongly correlated on good joints (r = 0.5 to 0.85
+# measured across all five package families), and that correlation is the whole
+# point. Anything that changes how much light reaches a component -- vignetting,
+# a dimmer corner, LED drift, board finish -- moves all three bands together,
+# along the axis where the covariance is large, so it costs almost no distance.
+# A genuinely starved joint loses the steep face while keeping the shallow one,
+# which moves ACROSS that axis where the covariance is small, and the distance
+# is large. A univariate test on the low band alone cannot tell the two apart,
+# which is why illumination non-uniformity is the largest single source of
+# false calls in a rule-based AOI layer.
+#
+# The distance is already normalised by the covariance, so unlike the NCC gate
+# this threshold is package-relative by construction and a fixed number is the
+# right shape for it.
+#
+# Set from measurement, not from a chi-square table. Over 2160 good pad-tests
+# the distance ran median 1.56, p99 3.50, p99.9 4.03, max 4.63; a fully starved
+# joint scores 36.8 at worst. That leaves a wide empty band between the two
+# populations, so the threshold sits above the observed good maximum with ~23%
+# margin while still being 6x below the nearest real defect. At 500 components
+# (1000 pad tests) per board that budgets well under 0.1 false calls per board
+# to this test, leaving room under the 1.0/board target in section 8.
+#
+# Re-derive this against real golden boards once they exist. Synthetic joints
+# are tidier than real ones and the good-side tail will be fatter.
+BAND_MAHALANOBIS_FAIL: float = 6.0
+
+# Regularisation for the 3x3 covariance. Not optional: teach runs on 5-20
+# boards, so the covariance is estimated from very few samples, and bands
+# correlated at 0.8 leave one near-collapsed axis whose small eigenvalue a plain
+# inverse turns into an enormous distance. Unregularised, the test meant to cut
+# false calls becomes a source of them.
+BAND_COV_RIDGE: float = 0.15    # shrink off-diagonals toward a diagonal matrix
+BAND_COV_FLOOR: float = 0.01    # absolute floor on per-band std, as for band_std
+
 # Used only before any golden model exists (rule layer running from a cold
 # start). Package-relative gating is not available then.
 NCC_FAIL_UNTAUGHT: float = 0.62

@@ -23,7 +23,7 @@ ROT_SEARCH_DEG = tuple(float(d) for d in range(-24, 25, 3))
 FEATURE_NAMES = (
     "ncc", "dx_um", "dy_um", "dtheta_deg", "pol_margin", "body_contrast",
     "contrast_ratio", "gap_spec", "band_low_0", "band_mid_0", "band_high_0",
-    "band_low_1", "band_mid_1", "band_high_1", "band_z", "anomaly",
+    "band_low_1", "band_mid_1", "band_high_1", "band_maha", "anomaly",
 )
 
 
@@ -40,13 +40,13 @@ class Measure:
     contrast_ratio: float = 1.0
     gap_spec: float = 0.0
     bands: np.ndarray = field(default_factory=lambda: np.zeros((2, 3), np.float32))
-    band_z: float = 0.0
+    band_maha: float = 0.0   # worst per-pad Mahalanobis distance from golden
     anomaly: float = 0.0
 
     def vector(self) -> np.ndarray:
         return np.array([self.ncc, self.dx_um, self.dy_um, self.dtheta_deg,
                          self.pol_margin, self.body_contrast, self.contrast_ratio,
-                         self.gap_spec, *self.bands.ravel(), self.band_z,
+                         self.gap_spec, *self.bands.ravel(), self.band_maha,
                          self.anomaly], np.float32)
 
 
@@ -58,13 +58,19 @@ class GoldenPackage:
     body_180: np.ndarray
     body_mask: np.ndarray                # body footprint within `body`
     band_mean: np.ndarray                # (2, 3)
-    band_std: np.ndarray
+    band_std: np.ndarray                 # (2, 3), diagnostics and reporting only
+                                         # -- the fillet decision uses band_cov_inv
     gap_mean: float
     gap_std: float
     contrast_mean: float
     contrast_std: float
     ncc_mean: float = 1.0                # how well a GOOD part of this package
     ncc_std: float = 0.0                 # matches its own golden body template
+    # (2, 3, 3) regularised inverse covariance of the three band fractions, per
+    # pad. Defaults to an uncorrelated matrix at the std floor so a hand-built
+    # Golden still scores something sane rather than dividing by zero.
+    band_cov_inv: np.ndarray = field(
+        default_factory=lambda: np.stack([np.eye(3) / config.BAND_COV_FLOOR ** 2] * 2))
 
     @property
     def ncc_fail(self) -> float:
@@ -117,6 +123,47 @@ def band_fractions(region: np.ndarray, pkg: Package,
         for j, ch in enumerate(config.ANGLED_CHANNELS):
             k = config.CHANNELS.index(ch)
             out[i, j] = float((win[..., k] > config.BAND_THRESHOLD).mean())
+    return out
+
+
+def _band_cov_inv(samples: np.ndarray) -> np.ndarray:
+    """Regularised inverse covariance of one pad's three band fractions.
+
+    `samples` is (N, 3), one row per golden board.
+
+    The regularisation is load-bearing, not hygiene. Teach runs on 5-20 boards,
+    so a 3x3 covariance is estimated from very few samples, and the three bands
+    are correlated at r = 0.5 to 0.85 on good joints. That leaves one
+    near-collapsed axis, and a plain inverse turns its small eigenvalue into an
+    enormous distance for a tiny deviation -- so the test meant to cut false
+    calls would generate them instead. Shrinking the off-diagonals bounds the
+    condition number while keeping the correlation that makes the test work.
+    """
+    n = int(samples.shape[0])
+    floor = config.BAND_COV_FLOOR ** 2
+    if n < 2:
+        return np.eye(3) / floor
+    cov = np.atleast_2d(np.cov(samples.astype(np.float64), rowvar=False))
+    r = config.BAND_COV_RIDGE
+    cov = (1.0 - r) * cov + r * np.diag(np.diag(cov))
+    cov = cov + floor * np.eye(3)
+    return np.linalg.inv(cov)
+
+
+def band_distance(bands: np.ndarray, g: "GoldenPackage") -> np.ndarray:
+    """Mahalanobis distance of each pad's band triple from the golden mean.
+
+    Returns (2,), one distance per land. Scoring the three bands jointly rather
+    than one at a time is the whole point: anything that changes how much light
+    reaches a component moves all three together, along the high-covariance axis
+    where it costs almost no distance, while a starved joint loses the steep
+    face but keeps the shallow one and moves across that axis where it costs a
+    lot (spec section 5).
+    """
+    out = np.zeros(2, np.float64)
+    for pad in range(2):
+        d = bands[pad].astype(np.float64) - np.asarray(g.band_mean[pad], np.float64)
+        out[pad] = float(np.sqrt(max(float(d @ g.band_cov_inv[pad] @ d), 0.0)))
     return out
 
 
@@ -253,8 +300,7 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
 
     # fillet windows follow the lands, which do not move with the body
     m.bands = band_fractions(region, pkg)
-    z = np.abs(m.bands - g.band_mean) / np.maximum(g.band_std, 1e-3)
-    m.band_z = float(z.max())
+    m.band_maha = float(band_distance(m.bands, g).max())
     return m
 
 
@@ -297,6 +343,7 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
             body_mask=body_mask_for(body, pkg_obj),
             band_mean=bands.mean(axis=0),
             band_std=np.maximum(bands.std(axis=0), 0.01),
+            band_cov_inv=np.stack([_band_cov_inv(bands[:, pad, :]) for pad in range(2)]),
             gap_mean=float(np.mean(d["gap"])), gap_std=float(max(np.std(d["gap"]), 0.01)),
             contrast_mean=float(np.mean(d["con"])),
             contrast_std=float(max(np.std(d["con"]), 0.005)),
