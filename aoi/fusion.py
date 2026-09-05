@@ -49,51 +49,53 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
         sev = (m.gap_spec - g.gap_mean) / max(g.gap_std, 1e-3) / 5.0
         return V("bridge", sev, f"gap specular {m.gap_spec:.3f} vs {g.gap_mean:.3f}")
 
-    # 2. reversed -- the part is present, so this must precede the presence test
+    # 2. presence, decided on WHERE THE BODY IS rather than how well it
+    #    correlates.
+    #
+    #    NCC answers one question -- does this look like a good part -- and
+    #    collapses every way of not being one into a single low number. It
+    #    cannot tell a body that is absent from a body that is somewhere else,
+    #    which is why missing-vs-displaced and tombstone-vs-displaced both
+    #    resisted every threshold tried on it: the populations genuinely overlap
+    #    in NCC. Segmenting the body and measuring it answers directly.
+    #
+    #      no blob                     nothing was placed
+    #      spans its own width         standing on one land
+    #      spans its own length        lying flat; offset/skew will name it
+    #
+    #    The aspect test normalises by the body's WIDTH, not its golden length,
+    #    because a part standing on end spans exactly its width along the pad
+    #    axis whatever the package. Every tombstone measures 1.00; anything
+    #    lying flat measures its package aspect ratio, 1.5 to 2.2 here.
+    if g is not None:
+        body_gone = m.body_area_ratio < config.BODY_PRESENT_AREA
+
+        # Both signals have to agree before calling a part absent. Segmentation
+        # is the sharper instrument but it is also the one that can fail wholesale
+        # if a real board's body and substrate turn out closer in tone than the
+        # golden boards suggested -- and a segmentation that finds nothing would
+        # otherwise flag every component as missing. If correlation still sees a
+        # body, believe it and fall through.
+        if body_gone and m.ncc < g.ncc_absent:
+            return V("missing", 1.0 - m.ncc / max(g.ncc_mean, 1e-6),
+                     f"no body found (area {m.body_area_ratio:.2f} of golden, "
+                     f"NCC {m.ncc:.2f} vs {g.ncc_mean:.2f})")
+
+        if not body_gone and m.body_aspect < config.BODY_STANDING_ASPECT:
+            return V("tombstone",
+                     1.0 - m.body_aspect / config.BODY_STANDING_ASPECT,
+                     f"body spans {m.body_aspect:.2f}x its own width, standing "
+                     f"on one land")
+    elif m.ncc < config.NCC_FAIL_UNTAUGHT:
+        # No golden model, so there is nothing to segment against either.
+        return V("missing", 1.0 - m.ncc, f"NCC {m.ncc:.2f}, untaught package")
+
+    # 3. reversed. Safe here now: a part standing on end was already caught
+    #    above, and it was exactly that case which used to flip the 180 degree
+    #    template margin and come back as a polarity fault.
     if m.pol_margin < -0.05:
         return V("reversed", 1.0 + abs(m.pol_margin),
                  f"180 deg template wins by {abs(m.pol_margin):.3f}")
-
-    # 3. presence.
-    #
-    #    The gate is a fraction of what a good part of THIS package scores
-    #    against its own golden template, never a global constant. Golden NCC is
-    #    a property of the package: 0.92 on an 0603, 0.99 on a SOD-123. A single
-    #    absolute threshold lands in the middle of one package's defect
-    #    distribution while being unreachable for another -- at 0.62 a
-    #    tombstoned 0402 read 0.599 on one pad and 0.647 on the other, so which
-    #    land survived decided whether the fault was found.
-    #
-    #    Failing the gate only says the body is not on its footprint. Which
-    #    fault that is comes from the joints, not from the correlation score:
-    #
-    #      neither joint wetted, no body       -> nothing was placed
-    #      one joint fully formed, one bare    -> the part stood up
-    #      anything else                       -> it moved; let offset/skew name it
-    #
-    #    That last line is the one that matters. A part which walked off its
-    #    lands has both joints degraded and a low NCC, and it is a placement
-    #    fault, not a reflow fault. Naming it here would send the operator to
-    #    the wrong process fix, so it falls through on purpose.
-    if g is not None:
-        if m.ncc < g.ncc_fail:
-            unwetted = [m.bands[i, 0] < 0.30 * g.band_mean[i, 0] for i in range(2)]
-            n_unwetted = int(sum(unwetted))
-            surviving = max(m.bands[i, 0] / max(g.band_mean[i, 0], 1e-6)
-                            for i in range(2))
-            sev = 1.0 - m.ncc / max(g.ncc_mean, 1e-6)
-
-            if n_unwetted == 2 and m.ncc < g.ncc_absent:
-                return V("missing", sev,
-                         f"NCC {m.ncc:.2f} vs golden {g.ncc_mean:.2f}, neither joint wetted")
-            if n_unwetted == 1 and surviving >= config.TOMBSTONE_SURVIVING_BAND:
-                return V("tombstone", sev,
-                         f"NCC {m.ncc:.2f} vs golden {g.ncc_mean:.2f}, "
-                         f"one joint at {surviving:.0%} of golden, one bare")
-    elif m.ncc < config.NCC_FAIL_UNTAUGHT:
-        # No golden model yet, so nothing is package-relative and the joint
-        # evidence has no reference to be compared against.
-        return V("missing", 1.0 - m.ncc, f"NCC {m.ncc:.2f}, untaught package")
 
     # 4. placement
     off = float(np.hypot(m.dx_um, m.dy_um))

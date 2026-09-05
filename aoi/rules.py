@@ -23,7 +23,9 @@ ROT_SEARCH_DEG = tuple(float(d) for d in range(-24, 25, 3))
 FEATURE_NAMES = (
     "ncc", "dx_um", "dy_um", "dtheta_deg", "pol_margin", "body_contrast",
     "contrast_ratio", "gap_spec", "band_low_0", "band_mid_0", "band_high_0",
-    "band_low_1", "band_mid_1", "band_high_1", "band_maha", "anomaly",
+    "band_low_1", "band_mid_1", "band_high_1", "band_maha",
+    "body_area_ratio", "body_aspect", "body_shift_um", "body_clipped",
+    "anomaly",
 )
 
 
@@ -41,12 +43,18 @@ class Measure:
     gap_spec: float = 0.0
     bands: np.ndarray = field(default_factory=lambda: np.zeros((2, 3), np.float32))
     band_maha: float = 0.0   # worst per-pad Mahalanobis distance from golden
+    body_area_ratio: float = 1.0   # segmented body area / golden. 0 = no body
+    body_aspect: float = 2.0       # body extent along the pad axis / its own width
+    body_shift_um: float = 0.0     # body centroid distance from nominal
+    body_clipped: float = 0.0      # 1.0 if the blob runs into the crop edge
     anomaly: float = 0.0
 
     def vector(self) -> np.ndarray:
         return np.array([self.ncc, self.dx_um, self.dy_um, self.dtheta_deg,
                          self.pol_margin, self.body_contrast, self.contrast_ratio,
                          self.gap_spec, *self.bands.ravel(), self.band_maha,
+                         self.body_area_ratio, self.body_aspect,
+                         self.body_shift_um, self.body_clipped,
                          self.anomaly], np.float32)
 
 
@@ -66,23 +74,20 @@ class GoldenPackage:
     contrast_std: float
     ncc_mean: float = 1.0                # how well a GOOD part of this package
     ncc_std: float = 0.0                 # matches its own golden body template
+    # Body segmentation, learned at teach: the two thresholds that separate the
+    # body from the lands (high channel) and from bare substrate (diffuse), plus
+    # what a correctly placed body of this package measures.
+    body_spec_max: float = 0.19
+    body_dif_min: float = 0.23
+    body_len_mm: float = 1.0     # diagnostics and reporting only
+    body_width_mm: float = 1.0   # extent ACROSS the pad axis; a body standing on
+                                 # one land spans exactly this along the axis
+    body_area_px: float = 1.0
     # (2, 3, 3) regularised inverse covariance of the three band fractions, per
     # pad. Defaults to an uncorrelated matrix at the std floor so a hand-built
     # Golden still scores something sane rather than dividing by zero.
     band_cov_inv: np.ndarray = field(
         default_factory=lambda: np.stack([np.eye(3) / config.BAND_COV_FLOOR ** 2] * 2))
-
-    @property
-    def ncc_fail(self) -> float:
-        """Below this, the body is not on its footprint.
-
-        Whichever of the two rules gives the LOOSER gate wins. The fraction is
-        the normal case; the sigma term only takes over for a package whose
-        correlation genuinely varies more than the fraction allows for, where a
-        wider spread means the gate needs more room, not less.
-        """
-        return min(self.ncc_mean * config.NCC_FAIL_FRACTION,
-                   self.ncc_mean - config.NCC_FAIL_SIGMA * self.ncc_std)
 
     @property
     def ncc_absent(self) -> float:
@@ -131,6 +136,76 @@ def band_fractions(region: np.ndarray, pkg: Package,
             k = config.CHANNELS.index(ch)
             out[i, j] = float((win[..., k] > config.BAND_THRESHOLD).mean())
     return out
+
+
+@dataclass
+class BodyBlob:
+    """Where the body actually is on the crop, and how big it is."""
+    found: bool = False
+    dx_mm: float = 0.0          # centroid offset from nominal, along the pad axis
+    dy_mm: float = 0.0
+    length_mm: float = 0.0      # extent along the pad axis
+    width_mm: float = 0.0
+    area_px: int = 0
+    clipped: bool = False       # blob runs into the crop edge, so its extent is
+                                # a crop boundary rather than the part boundary
+
+
+def specular_max(region: np.ndarray) -> np.ndarray:
+    """Brightest of the three angled rings at each pixel.
+
+    Metal is specular and lights up in whichever ring matches its slope, so the
+    max over rings catches a fillet lit only in the low band as readily as flat
+    copper lit only in the high band. A component body is not specular and stays
+    dark in all three.
+    """
+    chans = [_norm(region[..., config.CHANNELS.index(c)])
+             for c in config.ANGLED_CHANNELS]
+    return np.maximum(np.maximum(chans[0], chans[1]), chans[2])
+
+
+def body_blob(region: np.ndarray, spec_max: float, dif_min: float) -> BodyBlob:
+    """Segment the component body and measure its position and extent.
+
+    The body is the one large region that is dark in every angled ring -- so
+    neither copper nor solder, both of which are specular in at least one of
+    them -- yet clearly brighter than bare substrate in the diffuse channel.
+    Measured across all five package families the body sits at 0.082-0.086 of
+    specular max, a polarity marking at 0.114-0.118, and metal at 0.62-0.72.
+
+    This answers a question NCC cannot. Correlation says how well the crop looks
+    like a good part and collapses every way of not being one into a single low
+    number; it cannot distinguish a body that is absent from a body that is
+    somewhere else. Position and extent distinguish them directly:
+
+        no blob                         nothing was placed
+        blob much shorter than golden   the part is standing on one land
+        blob full length, displaced     the part slid
+    """
+    sm = specular_max(region)
+    dif = _norm(region[..., config.CHANNELS.index("diffuse")])
+    mask = ((sm < spec_max) & (dif > dif_min)).astype(np.uint8)
+    # Opening drops speckle from sensor noise without touching a real body,
+    # which is hundreds of pixels across at 12 um/px.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+    n, _, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
+    if n < 2:
+        return BodyBlob()
+    i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    h, w = mask.shape
+    x0, y0 = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
+    x1 = x0 + int(stats[i, cv2.CC_STAT_WIDTH])
+    y1 = y0 + int(stats[i, cv2.CC_STAT_HEIGHT])
+    return BodyBlob(
+        clipped=bool(x0 <= 0 or y0 <= 0 or x1 >= w or y1 >= h),
+        found=True,
+        dx_mm=float((cent[i][0] - w / 2.0) * config.MM_PER_PX),
+        dy_mm=float((cent[i][1] - h / 2.0) * config.MM_PER_PX),
+        length_mm=float(stats[i, cv2.CC_STAT_WIDTH] * config.MM_PER_PX),
+        width_mm=float(stats[i, cv2.CC_STAT_HEIGHT] * config.MM_PER_PX),
+        area_px=int(stats[i, cv2.CC_STAT_AREA]),
+    )
 
 
 def _band_cov_inv(samples: np.ndarray) -> np.ndarray:
@@ -308,6 +383,18 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
     # fillet windows follow the lands, which do not move with the body
     m.bands = band_fractions(region, pkg)
     m.band_maha = float(band_distance(m.bands, g).max())
+
+    blob = body_blob(region, g.body_spec_max, g.body_dif_min)
+    m.body_area_ratio = blob.area_px / max(g.body_area_px, 1.0)
+    # Normalised by the body's own WIDTH, not its length. A part standing on one
+    # land spans exactly its width along the pad axis, whatever package it is, so
+    # this reads ~1.0 for every tombstone and ~1.6-2.0 for anything lying flat.
+    # Normalising by golden LENGTH instead confuses a tombstone with a part
+    # displaced far enough to be clipped by the crop edge, which also measures
+    # short but for an unrelated reason.
+    m.body_aspect = blob.length_mm / max(g.body_width_mm, 1e-6)
+    m.body_shift_um = float(np.hypot(blob.dx_mm, blob.dy_mm)) * 1000.0
+    m.body_clipped = 1.0 if blob.clipped else 0.0
     return m
 
 
@@ -319,9 +406,28 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
         for comp in board.components:
             pkg = comp.pkg
             region, _ = roi.extract_region(stack, comp, pkg)
-            d = acc.setdefault(comp.package, {"tpl": [], "band": [], "gap": [], "con": []})
+            d = acc.setdefault(comp.package, {"tpl": [], "band": [], "gap": [], "con": [],
+                                              "spec_body": [],
+                                              "df_body": [], "df_sub": [], "reg": []})
             dif = config.CHANNELS.index("diffuse")
             d["tpl"].append(_norm(region[..., dif]))
+            d["reg"].append(region)
+            # Levels the body segmentation thresholds are learned from. The body
+            # is dark in the high channel where the lands are bright, and bright
+            # in the diffuse channel where bare substrate is dark; each threshold
+            # goes midway between its own pair.
+            sm = specular_max(region)
+            dfc = _norm(region[..., dif])
+            # Body core only. Kept well inside the footprint so a polarity
+            # marking, which sits at 0.46-0.86 of the body half-length, stays
+            # mostly out of the sample; the median finishes the job.
+            bys, bxs = roi.local_box_px(np.array([0.0, 0.0]), roi.body_rect(pkg) * 0.45,
+                                        region.shape)
+            d["spec_body"].append(float(np.median(sm[bys, bxs])))
+            d["df_body"].append(float(dfc[bys, bxs].mean()))
+            # The 5th percentile of the crop is bare substrate -- the footprint
+            # margin guarantees some is always in view.
+            d["df_sub"].append(float(np.percentile(dfc, 5)))
             d["band"].append(band_fractions(region, pkg))
             d["gap"].append(gap_specular(region, pkg))
             d["con"].append(body_contrast(region, pkg))
@@ -342,6 +448,11 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
         # good-part distribution exists.
         nccs = [_match(t, body)[0] for t in d["tpl"] if t.shape == shp]
 
+        spec_max = float(np.median(d["spec_body"])) * config.BODY_SPECULAR_MULT
+        dif_min = (float(np.mean(d["df_body"])) + float(np.mean(d["df_sub"]))) / 2.0
+        blobs = [body_blob(r, spec_max, dif_min) for r in d["reg"]]
+        blobs = [b for b in blobs if b.found]
+
         out.packages[name] = GoldenPackage(
             template=tpl,
             template_180=np.ascontiguousarray(np.rot90(tpl, 2)),
@@ -356,5 +467,10 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
             contrast_std=float(max(np.std(d["con"]), 0.005)),
             ncc_mean=float(np.mean(nccs)) if nccs else 1.0,
             ncc_std=float(np.std(nccs)) if nccs else 0.0,
+            body_spec_max=spec_max,
+            body_dif_min=dif_min,
+            body_len_mm=float(np.mean([b.length_mm for b in blobs])) if blobs else 1.0,
+            body_width_mm=float(np.mean([b.width_mm for b in blobs])) if blobs else 1.0,
+            body_area_px=float(np.mean([b.area_px for b in blobs])) if blobs else 1.0,
         )
     return out

@@ -38,49 +38,16 @@ MAX_SKEW_DEG: float = 12.0
 # 0603 sits at 0.92 while a SOD-123 sits at 0.99, so one absolute threshold
 # cannot mean "the body has moved" for both. A fraction of the taught mean does.
 #
-# The two levels answer different questions, which is why the gate needs both:
-#   FAIL   -- the body is not on its footprint (moved, stood up, or gone)
-#   ABSENT -- there is no body in the window at all
-# A part between them has moved but is still present, which is a placement
-# fault, so it falls through to the offset and skew tests to be named properly.
-# FAIL is placed at the geometric midpoint of the window measured between the
-# two things it has to separate, so the margin is even on both sides rather than
-# generous on one and thin on the other:
-#
-#   upper bound 0.961  the worst a GOOD part scored over 15 fresh boards (0805)
-#   lower bound 0.638  the best a defect scored whose LABEL depends on this gate
-#                      firing (0402 tombstone)
-#
-# sqrt(0.638 x 0.961) = 0.783, giving ~18% headroom each way. The previous 0.85
-# sat at 12% against false calls and 25% against missed detections; the gate was
-# paying for detection margin it did not need with headroom it did.
-#
-# Only defects whose label actually changes belong in that lower bound. SOD-123
-# and TANT-A tombstones score 0.81 and 0.77 and look like a much tighter
-# constraint, but they fall through to the same verdict whether the gate fires
-# or not, so including them would shrink the window to nothing in exchange for
-# no behaviour at all.
-NCC_FAIL_FRACTION: float = 0.78
-
-# Safety net for a package whose correlation genuinely varies more than teach
-# suggests. Inert on synthetic data - teach std runs 0.0008 to 0.0125, so the
-# fraction always binds - and it engages once a package's spread passes about
-# 0.026, which real boards may well do. Whichever gives the LOOSER gate wins,
-# because a wide spread means more room is needed, not less.
-NCC_FAIL_SIGMA: float = 8.0
-
+# Only one level survives: ABSENT, used as a second opinion on "no body at all"
+# alongside the body segmentation below. The old FAIL level tried to say "the
+# body is not on its footprint" and was retired when body localisation replaced
+# it -- correlation cannot say WHERE the body went, and that was the question.
 # ABSENT separates "no body at all" from "body present but walked off its
 # lands". The window here is genuinely narrow - SOD-123 missing scores 0.572 and
 # an 0603 displaced 500 um scores 0.612 - so this value is doing more work than
 # a single number comfortably can. Re-derive it on real boards; see
 # tests/test_known_limits.py.
 NCC_ABSENT_FRACTION: float = 0.60
-
-# A tombstone stands on one land with that joint fully formed; the other land is
-# bare. A part that merely walked off its pads has BOTH joints degraded. This is
-# the fraction of the golden low-angle band the surviving joint must still reach
-# for "stood up" to beat "displaced".
-TOMBSTONE_SURVIVING_BAND: float = 0.75
 
 # ---- fillet grading ----------------------------------------------------------
 # Joint quality is scored as a Mahalanobis distance of the pad's three band
@@ -129,3 +96,48 @@ NCC_FAIL_UNTAUGHT: float = 0.62
 DEFECT_CLASSES: tuple[str, ...] = (
     "ok", "missing", "offset", "skew", "reversed", "insufficient", "bridge", "tombstone",
 )
+
+# ---- body localisation -------------------------------------------------------
+# Where the body actually is on the crop, as opposed to how well it correlates.
+# NCC answers "does this look like a good part" and collapses everything that is
+# not into one low number; it cannot tell an absent body from one sitting
+# somewhere else, which is why missing/displaced and tombstone/displaced both
+# resisted every threshold tried on it. Segmenting the body and measuring its
+# position and extent answers the question directly.
+#
+# The body is the one large region that is dark in the high-angle channel (so
+# not copper, not solder) yet clearly brighter than bare substrate in the
+# diffuse channel. Both thresholds are learned per package at teach, midway
+# between the two populations they separate.
+
+# The body is segmented on specular_max = max(low, mid, high) rather than the
+# high channel alone, so solder lit in ANY ring is excluded rather than only
+# solder lying flat. That level is a property of the material: measured over
+# every package family the body sits at 0.082-0.086, a polarity marking at
+# 0.114-0.118, and copper or solder at 0.62-0.72. The threshold is this multiple
+# of the body level measured at teach, which lands above the marking (so a
+# marking does not split the body in two) and far below any metal.
+#
+# It has to be learned this way rather than from a bright reference in the crop:
+# on SOD-123 and TANT-A the body nearly covers the land pattern, so there is no
+# bare copper left to sample and a midpoint rule collapses onto the body level.
+BODY_SPECULAR_MULT: float = 2.2
+
+# Blob area as a fraction of the golden blob. Below this there is no body in the
+# crop at all. Measured: a missing part scores 0.00 (no component survives the
+# open), the smallest real body is a tombstoned 0402 at 0.29.
+BODY_PRESENT_AREA: float = 0.12
+
+# Body extent along the pad axis divided by the body's own width. A part
+# standing on one land spans exactly its width along that axis whatever the
+# package, so every tombstone lands near 1.0; a part lying flat spans its length
+# and lands at the package aspect ratio, 1.6 to 2.0 here.
+#
+# Normalising by the body's WIDTH rather than its golden LENGTH is what makes a
+# single threshold work. Against golden length, a tombstone (0.22-0.61) collides
+# with a part displaced far enough to be clipped by the crop edge (0.758 on an
+# 0402), which measures short because the crop cut it, not because it stood up.
+# Against its own width those separate cleanly: tombstones 0.42-1.00, everything
+# lying flat 1.45-2.01, and this sits at the geometric midpoint with ~17% margin
+# on each side.
+BODY_STANDING_ASPECT: float = 1.20
