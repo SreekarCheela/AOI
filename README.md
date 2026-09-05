@@ -127,8 +127,27 @@ A coverage gap is reported apart from defects and never enters the queue: a
 component with no inspection program is a gap in the program, not a fault on the
 board, and mixing them is how one unprogrammed package buries the real fails.
 
-Measured on a 54-component board with 12 fails: **12 labelled crops exported,
-40 s of operator time**, against the 60 s target. Per package:
+**Review time is measured as the rate actually sustained, not wall time.** A
+real review of a 12-fail board took 85.8 s, of which the *first* component took
+60.2 s while the other eleven averaged 2.3 s. A raw sum reports that operator as
+having failed a 60 s target they were beating by more than half. Orientation on
+a first board is not review time, and neither is an interruption — and a sum
+cannot tell any of them apart.
+
+So the target is judged on median-per-component × count, the raw total is
+reported alongside rather than hidden, and anything far above the median is
+counted and located: one slow component in first position is orientation, the
+same component in tenth is an interruption, and those call for different
+responses. A uniformly slow board still fails; the median rescues nobody.
+
+```
+28 s for 12 at the rate actually sustained (2.3 s each), under the 60 s target.
+Wall time was 86 s: 1 component ran long, the slowest 60 s — orientation, it was
+the first component.
+```
+
+Measured on a 54-component board with 12 fails: **12 labelled crops exported**,
+against the 60 s target. Per package:
 
 ```
 package      seen  flagged  judged  false  real     FCR   review

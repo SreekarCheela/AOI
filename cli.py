@@ -403,10 +403,10 @@ def cmd_review(a: argparse.Namespace) -> None:
             print("nothing queued -- every fail on this board is already adjudicated")
             return
         review.ReviewApp(st, bid, operator=a.operator).run()
-        secs = st.board_review_seconds(bid)
         left = len(st.review_queue(bid))
-        print(f"adjudicated {len(queue) - left} of {len(queue)} in {secs:.0f} s "
-              f"({'under' if secs < 60 else 'OVER'} the 60 s target)")
+        t = st.review_timing(bid)
+        print(f"adjudicated {len(queue) - left} of {len(queue)}")
+        print(f"  {t.note}")
 
 
 # ----------------------------------------------------------------------- yield

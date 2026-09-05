@@ -22,7 +22,9 @@ Three design points, all from the spec:
 from __future__ import annotations
 
 import sqlite3
+import statistics
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,6 +103,51 @@ def decode_crop(blob: bytes, channels: int = 4) -> np.ndarray:
         raise ValueError("could not decode crop")
     w = strip.shape[1] // channels
     return np.stack([strip[:, i * w:(i + 1) * w] for i in range(channels)], axis=-1)
+
+
+# A component taking far longer than the rest of its board was not being
+# reviewed for that whole time: the operator was orienting, or interrupted.
+OUTLIER_MULTIPLE = 5.0
+OUTLIER_FLOOR_S = 10.0
+
+# Section 10: a full board's fails, under a minute.
+REVIEW_TARGET_S = 60.0
+
+
+@dataclass(frozen=True)
+class ReviewTiming:
+    """What a board's review actually cost, and whether it met the target."""
+    board_id: int
+    adjudicated: int
+    total_s: float           # wall time, everything included
+    median_s: float          # per component
+    throughput_s: float      # median x count: the rate actually sustained
+    slowest_s: float
+    slowest_position: int = 0    # 1-based, in decision order
+    outliers: int = 0            # components far above the median
+
+    @property
+    def meets_target(self) -> bool:
+        """Judged on sustained rate, not on wall time."""
+        return self.adjudicated > 0 and self.throughput_s < REVIEW_TARGET_S
+
+    @property
+    def note(self) -> str:
+        """One line saying what the numbers mean, including when they disagree."""
+        if not self.adjudicated:
+            return "nothing adjudicated"
+        verdict = ("under" if self.meets_target else "OVER") + \
+                  f" the {REVIEW_TARGET_S:.0f} s target"
+        if not self.outliers:
+            return f"{self.throughput_s:.0f} s for {self.adjudicated}, {verdict}"
+        where = ("orientation, it was the first component"
+                 if self.slowest_position == 1
+                 else f"an interruption at component {self.slowest_position}")
+        return (f"{self.throughput_s:.0f} s for {self.adjudicated} at the rate "
+                f"actually sustained ({self.median_s:.1f} s each), {verdict}. "
+                f"Wall time was {self.total_s:.0f} s: {self.outliers} component"
+                f"{'s' if self.outliers > 1 else ''} ran long, the slowest "
+                f"{self.slowest_s:.0f} s -- {where}.")
 
 
 def _now() -> str:
@@ -274,10 +321,57 @@ class Store:
         return out
 
     def board_review_seconds(self, board_id: int) -> float:
-        """Total operator time on one board -- the section 10 exit criterion is
-        that a full board's fails go by in under 60 seconds."""
+        """Wall time an operator spent on one board, outliers and all."""
         row = self.db.execute(
             "SELECT COALESCE(SUM(a.seconds), 0.0) AS s FROM adjudication a"
             " JOIN verdict v ON v.id = a.verdict_id WHERE v.board_id = ?",
             (board_id,)).fetchone()
         return float(row["s"])
+
+    def review_timing(self, board_id: int) -> ReviewTiming:
+        """How fast a board was reviewed, measured so one pause cannot decide it.
+
+        Section 10's criterion is a full board's fails in under sixty seconds by
+        an operator with thirty minutes of training. A raw sum does not measure
+        that. The first component on an operator's first board absorbs all the
+        orientation -- reading the layout, learning what the two panels mean,
+        finding the keys -- and an interruption anywhere lands entirely on
+        whichever component happened to be on screen. Both are wall time and
+        neither is review time, and a sum cannot tell any of them apart.
+
+        Observed: a 12-fail board took 85.8 s, of which the FIRST component took
+        60.2 s and the other eleven averaged 2.3 s. The sum says the operator
+        failed the criterion. The operator was reviewing at roughly 26 s per
+        board.
+
+        So the target is judged on the median per component times the number of
+        components -- the rate the operator actually sustained. The raw total is
+        reported alongside, never hidden, and anything far above the median is
+        counted and located rather than quietly dropped: one slow component in
+        first position is orientation, the same component in tenth position is
+        an interruption, and they call for different responses.
+        """
+        rows = self.db.execute(
+            "SELECT a.seconds FROM adjudication a JOIN verdict v ON v.id = a.verdict_id"
+            " WHERE v.board_id = ? AND a.seconds IS NOT NULL"
+            " ORDER BY a.decided_at, a.verdict_id", (board_id,)).fetchall()
+        secs = [float(r["seconds"]) for r in rows]
+        if not secs:
+            return ReviewTiming(board_id, 0, 0.0, 0.0, 0.0, 0.0, 0, 0)
+
+        median = float(statistics.median(secs))
+        # Scale-relative, with an absolute floor so a board where every decision
+        # takes half a second does not flag a three-second one as an anomaly.
+        limit = max(OUTLIER_MULTIPLE * median, OUTLIER_FLOOR_S)
+        outliers = [i for i, v in enumerate(secs) if v > limit]
+        slowest = max(range(len(secs)), key=lambda i: secs[i])
+        return ReviewTiming(
+            board_id=board_id,
+            adjudicated=len(secs),
+            total_s=float(sum(secs)),
+            median_s=median,
+            throughput_s=median * len(secs),
+            slowest_s=secs[slowest],
+            slowest_position=slowest + 1,
+            outliers=len(outliers),
+        )

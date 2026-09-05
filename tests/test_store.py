@@ -235,3 +235,103 @@ def test_the_latest_board_is_what_review_opens(db, inspected, brd, golden):
     res = pipeline.Inspector(golden).inspect(render_with(brd, {}), brd)
     second = db.save_result(brd, res, None)
     assert db.latest_board()["id"] == second != bid
+
+
+# ------------------------------------------------------------ review timing
+def _time_board(db, bid, seconds):
+    """Record one adjudication per given per-component time, in that order.
+
+    Builds its own verdict rows rather than borrowing the fixture's queue, so
+    the timing cases are independent of how many defects that fixture injects.
+    """
+    ids = []
+    for i, _ in enumerate(seconds):
+        cur = db.db.execute(
+            "INSERT INTO verdict (board_id, refdes, package, failed, testable,"
+            " reason, score, detail) VALUES (?,?,?,1,1,'offset',1.0,'')",
+            (bid, f"T{i}", "0402"))
+        ids.append(int(cur.lastrowid))
+    db.db.commit()
+    for vid, sec in zip(ids, seconds):
+        db.adjudicate(vid, "defect", "sam", sec)
+
+
+def test_one_slow_component_does_not_decide_the_board(db, inspected):
+    """The bug this replaced.
+
+    Measured on a real review: a 12-fail board took 85.8 s wall time, of which
+    the FIRST component took 60.2 s while the other eleven averaged 2.3 s. A raw
+    sum reports that operator as having failed a 60 s target they were beating
+    by more than half. Orientation on a first board is not review time, and
+    neither is an interruption.
+    """
+    bid, _ = inspected
+    _time_board(db, bid, [60.2, 2.1, 1.3, 0.9, 2.8, 0.8, 2.7, 2.1, 0.7, 2.5, 1.4])
+    t = db.review_timing(bid)
+
+    assert t.total_s > store.REVIEW_TARGET_S, "test data no longer has the outlier"
+    assert t.throughput_s < store.REVIEW_TARGET_S
+    assert t.meets_target, (
+        f"sustained rate {t.median_s:.1f} s x {t.adjudicated} = "
+        f"{t.throughput_s:.0f} s, but the board was judged on {t.total_s:.0f} s")
+
+
+def test_the_raw_total_is_reported_not_hidden(db, inspected):
+    """Discarding the outlier silently would be its own kind of lie: the
+    operator really was at the station for that long."""
+    bid, _ = inspected
+    _time_board(db, bid, [60.0, 2.0, 2.0, 2.0])
+    t = db.review_timing(bid)
+    assert t.total_s == pytest.approx(66.0)
+    assert "66 s" in t.note and "wall time" in t.note.lower()
+
+
+def test_a_slow_first_component_reads_as_orientation(db, inspected):
+    bid, _ = inspected
+    _time_board(db, bid, [45.0, 2.0, 2.0, 2.0, 2.0])
+    t = db.review_timing(bid)
+    assert t.slowest_position == 1 and t.outliers == 1
+    assert "orientation" in t.note
+
+
+def test_a_slow_component_later_reads_as_an_interruption(db, inspected):
+    """Same duration, different meaning. Orientation is a training cost that
+    goes away; an interruption mid-board is a floor problem that does not."""
+    bid, _ = inspected
+    _time_board(db, bid, [2.0, 2.0, 45.0, 2.0, 2.0])
+    t = db.review_timing(bid)
+    assert t.slowest_position == 3 and t.outliers == 1
+    assert "interruption" in t.note and "component 3" in t.note
+
+
+def test_a_genuinely_slow_board_still_fails_the_target(db, inspected):
+    """The point is not to make every board pass. An operator who is uniformly
+    slow has not been rescued by the median."""
+    bid, _ = inspected
+    _time_board(db, bid, [9.0] * 8)
+    t = db.review_timing(bid)
+    assert not t.outliers, "uniformly slow is not an outlier"
+    assert not t.meets_target and "OVER" in t.note
+
+
+def test_a_fast_board_flags_nothing(db, inspected):
+    bid, _ = inspected
+    _time_board(db, bid, [2.0, 2.4, 1.8, 2.1, 2.2])
+    t = db.review_timing(bid)
+    assert t.outliers == 0 and t.meets_target
+    assert "wall time" not in t.note.lower(), "no need to explain an unremarkable board"
+
+
+def test_a_small_absolute_time_is_never_an_outlier(db, inspected):
+    """Without a floor, a board where every decision takes half a second would
+    flag a three-second one -- six times the median and completely normal."""
+    bid, _ = inspected
+    _time_board(db, bid, [0.4, 0.5, 0.5, 3.0, 0.6])
+    assert db.review_timing(bid).outliers == 0
+
+
+def test_timing_is_empty_before_anyone_reviews(db, inspected):
+    bid, _ = inspected
+    t = db.review_timing(bid)
+    assert t.adjudicated == 0 and t.total_s == 0.0
+    assert not t.meets_target and t.note == "nothing adjudicated"

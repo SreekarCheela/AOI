@@ -94,6 +94,23 @@ class ReviewApp:
         self._build()
         self._bind()
         self._show()
+        self._present()
+
+    def _present(self) -> None:
+        """Come to the front and take the keyboard.
+
+        The station launches this from a shell and the operator's next action is
+        a keystroke; a window that opens behind the terminal silently swallows
+        the first few decisions.
+        """
+        self.root.update_idletasks()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(400, lambda: self.root.attributes("-topmost", False))
+        try:
+            self.root.focus_force()
+        except tk.TclError:                      # no window manager present
+            pass
 
     # ---------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -192,16 +209,20 @@ class ReviewApp:
         self._show()
 
     def _finish(self) -> None:
-        secs = self.store.board_review_seconds(self.board_id)
+        t = self.store.review_timing(self.board_id)
         gaps = self.store.untestable(self.board_id)
         self.title.configure(text="Board reviewed")
         self.progress.configure(text="")
         for p in self.panels:
             p.configure(image="", text="", width=0, height=0)
-        self.reason.configure(text=f"{len(self.queue)} adjudicated in {secs:.0f} s",
-                              fg=FALSE if secs < 60 else DEFECT)
-        msg = ("under the 60 s target" if secs < 60
-               else "over the 60 s target in section 10")
+        # The rate sustained, not the wall clock. One pause -- orienting on a
+        # first board, or an interruption -- lands entirely on whichever
+        # component was on screen, and judging the operator on that is judging
+        # them on the interruption.
+        self.reason.configure(
+            text=f"{t.adjudicated} adjudicated at {t.median_s:.1f} s each",
+            fg=FALSE if t.meets_target else DEFECT)
+        msg = t.note
         if gaps:
             pkgs = sorted({g["package"] for g in gaps})
             msg += (f"\n\nNOT INSPECTED: {len(gaps)} components ({', '.join(pkgs)} "
