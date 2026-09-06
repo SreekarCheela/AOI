@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from . import config
+from . import config, packages
 from .board import Board, Component
 from .packages import Package
 
@@ -45,6 +45,20 @@ FILLET_SLOPE_OK_DEG = 52.0
 FILLET_SLOPE_STARVED_DEG = 22.0
 FILLET_POWER = 2.0
 
+# Excess solder is not a scaled-up fillet, and rendering it as one would be
+# rendering the wrong physics. Solder wets outward only as far as the flux and
+# the land allow; volume beyond that piles up instead, and the surface inverts
+# from a concave ramp -- shallow at the toe, steep at the termination -- into a
+# convex cap that is nearly FLAT over its apex and steep only at the rim.
+#
+# The consequence the inspector has to deal with is that the cap costs the
+# mid-slope face, so a balled joint's low band collapses exactly as a starved
+# one's does. What is left to separate them is where the solder went: the cap
+# spills past the land onto bare substrate.
+EXCESS_SPILL = 0.45      # cap overhang past the land edge, x the land half-extent
+EXCESS_WIDEN = 1.30      # cap half-width across the land, x the land half-width
+EXCESS_DOME = 0.55       # cap height, x its own half-run -- sets the rim slope
+
 
 @dataclass
 class Defect:
@@ -54,6 +68,11 @@ class Defect:
     dx: float = 0.0                   # mm
     dy: float = 0.0                   # mm
     dtheta: float = 0.0               # deg
+    substitute: str = ""              # kind="wrong_part": the package actually
+                                      # fitted, whose BODY is rendered on this
+                                      # component's lands. The lands belong to
+                                      # the board and do not change when the
+                                      # feeder does.
 
     @property
     def is_ok(self) -> bool:
@@ -76,6 +95,23 @@ class RenderOpts:
 def _rect(X: np.ndarray, Y: np.ndarray, cx: float, cy: float,
           hx: float, hy: float) -> np.ndarray:
     return (np.abs(X - cx) <= hx) & (np.abs(Y - cy) <= hy)
+
+
+def _dome_slope(u: np.ndarray, v: np.ndarray, a: float, b: float,
+                height: float) -> np.ndarray:
+    """Slope (deg) of a spherical cap of half-axes (a, b) piled `height` high.
+
+    h = height * sqrt(1 - (u/a)^2 - (v/b)^2), so the surface is FLAT at the apex
+    and turns vertical at the rim -- the exact inverse of the concave ramp
+    `_fillet_slope` draws. A joint carrying more solder than the land can wet
+    stops spreading and starts piling, and this is the shape it takes.
+    """
+    inside = np.clip(1.0 - (u / a) ** 2 - (v / b) ** 2, 0.0, 1.0)
+    # Guard the rim: the true gradient diverges there and arctan would saturate
+    # anyway, so clamping the denominator costs nothing and avoids a warning.
+    grad = height * np.sqrt((u / a ** 2) ** 2 + (v / b ** 2) ** 2) / np.maximum(
+        np.sqrt(inside), 1e-3)
+    return np.degrees(np.arctan(grad))
 
 
 def _fillet_slope(X: np.ndarray, x_toe: float, x_term: float,
@@ -120,7 +156,13 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
     p = _Patch(pkg, mm_per_px)
     X, Y = p.X, p.Y
     lands = pkg.lands()
-    body_hx, body_hy = pkg.body_l / 2.0, pkg.body_w / 2.0
+    # The lands are etched into the board and do not change when the wrong reel
+    # goes into the feeder; only the body sitting on them does. So the footprint,
+    # the crop and every land above come from the EXPECTED package, and the body
+    # geometry below comes from whatever was actually fitted.
+    fitted = packages.get(defect.substitute) if (
+        defect.kind == "wrong_part" and defect.substitute) else pkg
+    body_hx, body_hy = fitted.body_l / 2.0, fitted.body_w / 2.0
 
     # --- lands ---------------------------------------------------------------
     for l in lands:
@@ -178,12 +220,27 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
             toe = l.cy - l.ay * l.hy * 0.95
             term = -l.ay * body_hy + oy
             perp_c, perp_h = l.cx, l.hx
+
+        if defect.kind == "excess" and defect.pad == i:
+            # Spills outward past the toe onto bare substrate and sideways past
+            # the land: that is the half of the signature the inspector can
+            # actually separate from starvation.
+            sgn = 1.0 if term >= toe else -1.0
+            outer = toe - sgn * EXCESS_SPILL * l.half_along
+            a = abs(term - outer) / 2.0
+            b = perp_h * EXCESS_WIDEN
+            sl = _dome_slope(coord - (outer + term) / 2.0, perp - perp_c, a, b,
+                             EXCESS_DOME * a)
+            p.paint(((coord - (outer + term) / 2.0) / a) ** 2
+                    + ((perp - perp_c) / b) ** 2 <= 1.0, SOLDER, sl)
+            continue
+
         run = abs(term - toe)
         # Solve the climb height from the slope the joint should reach, rather
         # than from the body -- otherwise a tall package renders an 80 deg face
         # that overshoots every band and the test inverts.
         target = FILLET_SLOPE_STARVED_DEG if starved else FILLET_SLOPE_OK_DEG
-        h = min(np.tan(np.radians(target)) * run / FILLET_POWER, 0.85 * pkg.body_h)
+        h = min(np.tan(np.radians(target)) * run / FILLET_POWER, 0.85 * fitted.body_h)
         sl = _fillet_slope(coord, toe, term, h, FILLET_POWER)
         lo, hi = sorted((toe, term))
         mask = ((coord >= lo) & (coord <= hi)

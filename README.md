@@ -78,12 +78,15 @@ face that overshoots every band and inverts the test.
 | placement offset | 192–253 µm measured for 250 µm injected, all packages |
 | skew | 0.6° mean absolute error (3° search grid) |
 | board registration | 0.42 mm / 0.60° misregistration recovered to ~6 µm |
-| anomaly separation | ×32 mean across package families |
+| anomaly separation | ×29.6 mean across package families |
 | classifier | 100 % validation accuracy and recall |
-| fusion tree | 100 % recall, 0 false calls of 129 good |
+| fusion tree | 100 % recall, 1 false call of 114 good (0.88 %) |
+| rule layer, false calls | 0 over 1000 component inspections — 6 boards × 4 lighting conditions, misregistered |
+| excess solder | good and starved ≤ 0.038 outside the land, balled 0.216–0.671; threshold 0.12 |
+| wrong part | good ×0.802–×1.013 of golden body area, substitutions ×0.19–×4.81; bounds ×0.72 / ×1.12 |
 | end to end | 12/12 defects caught, 0 missed, 0 false calls, all types correctly labelled |
-| torch ↔ onnx parity | max delta 1.2e-07, 100 % argmax agreement |
-| throughput | 0.60 ms/component on ONNX → 0.37 s model time per 500-component board |
+| torch ↔ onnx parity | max delta 2.4e-07, 100 % argmax agreement |
+| throughput | 0.16 ms/component on ONNX → 0.07 s model time per 500-component board |
 
 These are synthetic numbers. They prove the logic and the wiring are right; they
 say nothing about false call rate on real boards, which is what §8 of the spec
@@ -321,8 +324,98 @@ an enormous distance, and unregularised the test that is meant to cut false
 calls generates them. And the comparison is **one-sided**: Mahalanobis distance
 is symmetric, so a joint carrying more solder than golden sits just as far from
 the mean as a starved one, and without a direction guard a heavy fillet gets
-reported as insufficient solder. Grading excess is a separate test that does not
-exist yet.
+reported as insufficient solder. Grading excess is a separate test, below.
+
+## Grading excess
+
+The one-sided guard above stops a *uniformly heavier* fillet being called
+starved. It does nothing for a **balled** joint, which is the shape excess
+solder actually takes, and which fails the starvation test's own condition.
+
+Solder wets outward only as far as flux and land allow. Volume past that piles
+up, and the surface inverts: a concave ramp — shallow at the toe, steep at the
+termination — becomes a convex cap, flat over its apex and steep only at the
+rim. The cap costs the mid-slope face, so **the low band collapses exactly as a
+starved joint's does**: measured on an 0603, 0.44 → 0.19 while the high band
+goes 0.28 → 0.63. Every balled joint the renderer produced came back labelled
+`insufficient` — the opposite fault, and an operator sent to add paste to a
+joint that already carries too much.
+
+Two measurements from the spec's own sentence for this test ("total wetted area
+vs golden, plus high-angle flat fraction") were tried and neither survives
+contact with a real land pattern:
+
+| measurement | why it fails |
+|---|---|
+| total metal area over the crop | Separates only ×1.16. Bare copper is as specular as solder and the land is a fixed size, so a starved joint reads the same as a good one — which is what makes area *specific* to excess, but the signal is only the spill, diluted by the whole crop. |
+| high-angle flat fraction | Does not discriminate, and on wide lands it actively vetoes. Bare copper is **flat**, so a *starved* joint scores a higher high-angle fraction (×2.6–3.1) than a balled one (×1.5–2.2). On a QFP-32 lead the cap replaces flat copper with curved solder and the high band *falls*, 0.29 → 0.20. |
+
+What works is asking where the solder is, not how much light comes back: the
+specular fraction of a 0.30 mm strip **just outside each land**, where CAD says
+bare substrate. Same question the bridge test asks between two lands, asked on
+the outer side. A starved joint leaves its own land bare and puts nothing
+outside it. Measured over all eight packages, good side sampled across placement
+scatter, vignetting 0.02–0.12 and LED gain 0.92–1.06:
+
+| population | reading |
+|---|---|
+| good joints | ≤ 0.038 |
+| starved joints | ≤ 0.038 |
+| balled joints | 0.216 – 0.671 |
+
+Threshold 0.12: 3.2× above the worst good reading, 1.8× below the weakest real
+defect, biased toward the false-call side because a 500-component board carries
+~1000 of these tests.
+
+Two things this measurement is not. It is **not** "metal is present" — a pixel
+passes only if its slope falls in one of the three rings, roughly 0–45°, so a
+balled joint's near-vertical rim is genuinely invisible and the signal is the
+shoulder inboard of it. And it is **not** an absolute threshold: golden's own
+reading is subtracted, so an oversized etch or a copper pour near the footprint
+cancels instead of becoming a permanent excess call on every instance of the
+package.
+
+The strip has to fit inside the crop's 0.35 mm margin. On every package in the
+library the outermost land *is* the package extent, so a wider window is clipped
+by the crop boundary — silently, with no error, measuring nothing. A first
+attempt grew the fillet window 1.6× instead, which put its outer edge 0.60 mm
+past the land on a QFP-32 and read ×1.01 there while every chip package read
+cleanly. `test_excess.py` pins the relationship.
+
+## Telling one part from another
+
+Wrong part is scored on the **area** of the segmented body, not on its bounding
+box. The bbox is a maximum-extent statistic: one speck of noise surviving the
+morphological open moves it (measured across good boards, bbox width wanders
+9.1 % against area's 1.3 %), and the axis-aligned bbox of a skewed part inflates
+39–46 % — enough to report every skewed component on the board as a wrong part.
+Area is a bulk statistic and is invariant to rotation.
+
+| population | body area vs golden |
+|---|---|
+| good boards | ×0.802 – ×1.013 |
+| offset, skew, starved, balled | ×0.96 – ×1.01 |
+| one-size-step substitutions | ×0.19 – ×4.81 |
+
+Bounds are ×0.72 and ×1.12. They are asymmetric because the good side is: the
+low tail is entirely one case, a SOD-123 at ×0.802 with LED output down 8 %.
+`body_dif_min` is an absolute diffuse level learned at teach, so dimming the
+whole image erodes the blob edge and shrinks the measured body. That is the same
+common-mode sensitivity the fillet test was rebuilt to avoid, and this test does
+not yet have the same defence — roughly a 10 % dim is the limit. The fix is to
+scale both segmentation thresholds by the crop's own substrate level, which
+teach already measures.
+
+The test sits with presence, not with joint quality, because it decides whether
+the golden model may be applied at all: every test after it compares against
+statistics for the package the centroid file *names*. It runs *after* the
+tombstone test on purpose — both faults make the body measure small, and
+standing on one land is far the commoner of the two, so the reading with a
+specific explanation claims it first. What that costs is in Known limits.
+
+The marking-classifier half of the spec's method for this test is not
+implemented. It needs a character model per manufacturer and a legible marking,
+which an 0402 does not have.
 
 ## Choosing the anomaly model
 
@@ -482,7 +575,24 @@ stays on the workstation.
 
 ## Known limits
 
-- Two-terminal packages only. Multi-lead parts need per-lead ROI generation.
+- A substituted part whose body length matches the *expected* part's width reads
+  "tombstone", not "wrong part". An 0603 body is 1.60 mm long and a SOD-123 is
+  1.60 mm wide, so on a SOD-123 footprint it spans exactly 1.00× the expected
+  width along the pad axis — which is the definition of standing on one land. On
+  body geometry alone the two are not distinguishable. The part is caught and
+  the board fails; the operator is sent to look at the joint rather than at the
+  stores. Fixing it means making the tombstone test require what a tombstone
+  implies — one land wetted and the other bare, which the spill measurement now
+  gives per land — rather than body shape alone.
+- A SOD-123 fitted on a TANT-A footprint reads "insufficient". The two share a
+  width and differ only in length, so the segmented area lands at ×0.86 — inside
+  the good population, whose low tail reaches ×0.80 under an 8 % dim. No
+  threshold separates them. It is caught anyway, by the joint: a shorter body
+  leaves a longer run from land to body edge and the stretched fillet reads
+  starved.
+- Excess solder is a threshold on defect *severity* as much as on the
+  measurement. A mild bulge that never spills past its land is not caught by an
+  area test and never will be.
 - An 0402 displaced 500 µm or more reads "bridge", not "offset". The body and
   its solder land squarely over the inter-pad gap, and the specular reading
   there is what the bridge test measures; the bridge test runs first by design

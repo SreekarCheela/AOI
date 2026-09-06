@@ -86,6 +86,13 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
     #    because a part standing on end spans exactly its width along the pad
     #    axis whatever the package. Every tombstone measures 1.00; anything
     #    lying flat measures its package aspect ratio, 1.5 to 2.2 here.
+    # Set when the segmentation says there is no body but correlation overrules
+    # it. That disagreement is evidence about the SEGMENTATION, not about the
+    # part: the threshold separating body from metal did not separate anything
+    # on this crop. Every measurement resting on that threshold is void for this
+    # component, and the spill test below is one of them.
+    seg_overruled = False
+
     if g is not None:
         body_gone = m.body_area_ratio < config.BODY_PRESENT_AREA
 
@@ -99,6 +106,7 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
             return V("missing", 1.0 - m.ncc / max(g.ncc_mean, 1e-6),
                      f"no body found (area {m.body_area_ratio:.2f} of golden, "
                      f"NCC {m.ncc:.2f} vs {g.ncc_mean:.2f})")
+        seg_overruled = body_gone
 
         # Only a two-terminal part can stand on one land -- an eight-lead SOIC
         # has nowhere to stand. The gate is not decoration: a QFP body is square,
@@ -109,6 +117,38 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
                      1.0 - m.body_aspect / config.BODY_STANDING_ASPECT,
                      f"body spans {m.body_aspect:.2f}x its own width, standing "
                      f"on one land")
+
+        # 2b. the right part, in the wrong size. Everything below this line
+        #     compares against golden statistics for the package the centroid
+        #     file NAMES, so if a different part was fitted, the placement
+        #     search, the polarity margin and the fillet windows are all being
+        #     scored against the wrong reference and whatever they report is
+        #     meaningless. That is why this sits with presence rather than with
+        #     joint quality: it is a question about what the golden model is
+        #     entitled to be applied to.
+        #
+        #     Deliberately after the tombstone test, not before. Both faults
+        #     make the body measure smaller than golden, and a part standing on
+        #     one land is by far the more common of the two, so the reading with
+        #     a specific explanation gets to claim it first. The cost is
+        #     recorded in tests/test_known_limits.py: a substitution whose body
+        #     length happens to match the expected part's WIDTH is
+        #     indistinguishable from that part standing up, on body geometry
+        #     alone, and comes back labelled tombstone.
+        #
+        #     A blob touching the crop edge is not evidence of anything: its
+        #     extent is the crop boundary rather than the part, so a component
+        #     displaced far enough to be clipped would otherwise read as a part
+        #     that is too small.
+        if not body_gone and not m.body_clipped and not (
+                config.WRONG_PART_AREA_LO <= m.body_area_ratio
+                <= config.WRONG_PART_AREA_HI):
+            r = m.body_area_ratio
+            sev = (config.WRONG_PART_AREA_LO / max(r, 1e-6) if r < 1.0
+                   else r / config.WRONG_PART_AREA_HI)
+            return V("wrong_part", sev - 1.0,
+                     f"body measures {r:.2f}x the golden area for {m.package} "
+                     f"({m.body_aspect:.2f}x its own width)")
     else:
         # No golden statistics for this package, so every test above and below
         # has nothing to compare against -- correlation, band distances, the
@@ -152,6 +192,35 @@ def rule_verdict(m: Measure, golden: Golden) -> Verdict:
     #    1080 good-component inspections.
     if g is not None:
         dist = band_distance(m.bands, g)
+
+        # Excess first, because a balled joint fails the insufficient test's
+        # own condition. Piling solder up instead of spreading it turns the
+        # concave ramp into a convex cap, and the shallow apex grows at the
+        # expense of the mid-slope face -- so the low band FALLS, exactly as it
+        # does on a starved joint (measured on an 0603: 0.44 -> 0.19). The
+        # one-sided guard below was written for a fillet that is uniformly
+        # heavier, and it does not catch this one; without this test every
+        # bulged joint here came back as insufficient solder, which sends the
+        # operator to add paste to a joint that already has too much.
+        #
+        # What separates the two is WHERE the solder is, not how much light
+        # comes back. A starved joint leaves its own land bare and puts nothing
+        # outside it; a bulged one spills onto substrate that CAD says carries
+        # no copper at all. Measured over all eight packages: good boards reach
+        # 0.038 under placement scatter and illumination drift, every balled
+        # joint reads 0.216 to 0.671.
+        #
+        # Golden's own spill is subtracted rather than assumed to be zero, which
+        # is what keeps an oversized land etch or a copper pour near the
+        # footprint from reading as excess solder: the golden boards come off
+        # the same fab with the same etch, so a standing feature outside the
+        # land is in `spill_mean` and cancels. Only a change from golden counts.
+        for pad in range(0 if seg_overruled else min(len(dist), len(m.spill))):
+            if m.spill[pad] > config.EXCESS_SPILL_FRACTION:
+                return V("excess", m.spill[pad] / config.EXCESS_SPILL_FRACTION - 1.0,
+                         f"{_land_name(pkg, pad)} has solder over "
+                         f"{m.spill[pad]:.0%} of the board just outside its land")
+
         for pad in range(len(dist)):
             # One-sided on purpose. Mahalanobis distance is symmetric, so a joint
             # carrying MORE solder than golden sits just as far from the mean as

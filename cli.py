@@ -33,7 +33,23 @@ from aoi import capture, config, fusion, models, pipeline, roi, rules, store, sy
 OUT = Path("out")
 MODELS = OUT / "models"
 DB = OUT / "station.db"
-INJECTABLE = ("missing", "offset", "skew", "reversed", "insufficient", "bridge", "tombstone")
+INJECTABLE = ("missing", "offset", "skew", "reversed", "insufficient", "bridge",
+              "tombstone", "excess", "wrong_part")
+
+# What a feeder mix-up actually looks like: a part one size step away, or a
+# neighbour in the same family. Only the body changes -- the land pattern is
+# etched into the board and does not care what was loaded into the machine.
+#
+# The pairs are chosen to differ enough in body area to be separable. Two that
+# are NOT here are the point: a 0603 body on a SOD-123 footprint spans exactly
+# the width a standing SOD-123 would, and a SOD-123 on a TANT-A footprint sits
+# 16% off in area against a good population that spreads 20%. Both are pinned
+# as known limits in tests/test_known_limits.py rather than hidden in the demo.
+WRONG_FITS = {
+    "0402": "0603", "0603": "0402", "0805": "0603",
+    "SOD-123": "TANT-A", "TANT-A": "0805",
+    "SOIC-8": "SOT-23-6", "SOT-23-6": "0603", "QFP-32": "SOIC-8",
+}
 
 
 # --------------------------------------------------------------------- helpers
@@ -55,13 +71,15 @@ def random_defects(brd: B.Board, n: int, rng: random.Random) -> dict[str, synth.
         # render a perfectly good part and then count it as a miss.
         kinds = [k for k in INJECTABLE
                  if (k != "reversed" or c.pkg.polarized)
-                 and (k != "tombstone" or c.pkg.is_two_terminal)]
+                 and (k != "tombstone" or c.pkg.is_two_terminal)
+                 and (k != "wrong_part" or c.package in WRONG_FITS)]
         k = rng.choice(kinds)
         n_targets = c.pkg.n_pads if k != "bridge" else len(c.pkg.adjacent_pairs())
         out[c.refdes] = synth.Defect(
             kind=k, pad=rng.randrange(max(1, n_targets)),
             dx=rng.choice([-1, 1]) * rng.uniform(0.18, 0.30) if k == "offset" else 0.0,
-            dtheta=rng.choice([-1, 1]) * rng.uniform(15.0, 25.0) if k == "skew" else 0.0)
+            dtheta=rng.choice([-1, 1]) * rng.uniform(15.0, 25.0) if k == "skew" else 0.0,
+            substitute=WRONG_FITS.get(c.package, "") if k == "wrong_part" else "")
     return out
 
 

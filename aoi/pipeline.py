@@ -162,7 +162,8 @@ class Inspector:
 _COL = {"ok": (90, 190, 90), "untaught": (150, 150, 150),
         "missing": (60, 60, 235), "offset": (40, 170, 240),
         "skew": (40, 210, 240), "reversed": (200, 80, 220), "insufficient": (70, 70, 240),
-        "bridge": (240, 120, 60), "tombstone": (90, 40, 200)}
+        "bridge": (240, 120, 60), "tombstone": (90, 40, 200),
+        "excess": (150, 200, 60), "wrong_part": (220, 200, 80)}
 
 
 def defect_map(stack: np.ndarray, board: Board, result: Result, path: str,

@@ -29,6 +29,7 @@ FEATURE_NAMES = (
     # part -- and the mean says whether the whole part is off or just one lead.
     "band_low_worst", "band_mid_worst", "band_high_worst",
     "band_low_mean", "band_mid_mean", "band_high_mean", "band_maha",
+    "spill_worst",
     "body_area_ratio", "body_aspect", "body_shift_um", "body_clipped",
     "anomaly",
 )
@@ -48,6 +49,9 @@ class Measure:
     gap_spec: float = 0.0
     bands: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), np.float32))
     band_maha: float = 0.0   # worst per-pad Mahalanobis distance from golden
+    spill: np.ndarray = field(    # (n_lands,) specular fraction just outside each
+        default_factory=lambda: np.zeros(0, np.float32))   # land, minus golden's
+    spill_worst: float = 0.0      # the land whose solder spread furthest
     body_area_ratio: float = 1.0   # segmented body area / golden. 0 = no body
     body_aspect: float = 2.0       # body extent along the pad axis / its own width
     body_shift_um: float = 0.0     # body centroid distance from nominal
@@ -67,6 +71,7 @@ class Measure:
         return np.array([self.ncc, self.dx_um, self.dy_um, self.dtheta_deg,
                          self.pol_margin, self.body_contrast, self.contrast_ratio,
                          self.gap_spec, *self.band_summary(), self.band_maha,
+                         self.spill_worst,
                          self.body_area_ratio, self.body_aspect,
                          self.body_shift_um, self.body_clipped,
                          self.anomaly], np.float32)
@@ -84,6 +89,8 @@ class GoldenPackage:
                                          # -- the fillet decision uses band_cov_inv
     gap_mean: float
     gap_std: float
+    spill_mean: np.ndarray               # (n_lands,) specular fraction just
+                                         # outside each land on a good joint
     contrast_mean: float
     contrast_std: float
     ncc_mean: float = 1.0                # how well a GOOD part of this package
@@ -173,6 +180,62 @@ def band_fractions(region: np.ndarray, pkg: Package,
         for j, ch in enumerate(config.ANGLED_CHANNELS):
             k = config.CHANNELS.index(ch)
             out[i, j] = float((win[..., k] > config.BAND_THRESHOLD).mean())
+    return out
+
+
+def spill_boxes(pkg: Package) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The strip just OUTSIDE each land's outer edge, where solder must not be.
+
+    Not the fillet window, and not a grown version of it. Inside the fillet
+    window a balled joint scores 1.00: the extra volume displaced the fillet
+    rather than adding to it, and a window bounded by the toe and the body edge
+    is exactly the region solder is supposed to fill. The evidence for excess is
+    solder that went where CAD says bare substrate, which is the same question
+    the bridge test asks between two lands, asked on the outer side instead.
+
+    Sized to fit inside the inspection crop. The crop carries a 0.35 mm margin
+    past the package extent, and on every package in the library the outermost
+    land IS the extent, so the strip has to stay under that or it is silently
+    clipped -- which is not a loud failure, it is a test that quietly measures
+    nothing. `test_excess.py` pins that relationship.
+    """
+    out = []
+    d = config.SPILL_STRIP_MM
+    for l in pkg.lands():
+        if abs(l.ax) > abs(l.ay):                      # land on a left/right row
+            edge = l.cx - l.ax * l.hx                  # outer edge, away from body
+            out.append((np.array([edge - l.ax * d / 2.0, l.cy]),
+                        np.array([d / 2.0, l.hy])))
+        else:                                          # top/bottom row
+            edge = l.cy - l.ay * l.hy
+            out.append((np.array([l.cx, edge - l.ay * d / 2.0]),
+                        np.array([l.hx, d / 2.0])))
+    return out
+
+
+def spill_fractions(region: np.ndarray, pkg: Package, metal_min: float) -> np.ndarray:
+    """Specular fraction of each land's outward spill strip. (n_lands,).
+
+    On a good joint this is bare substrate and reads ~0. It is a fraction rather
+    than a ratio against golden because the golden value is zero, and a ratio
+    against zero is not a measurement.
+
+    What the threshold actually counts is worth being precise about: a pixel
+    passes if it is specular AND its slope falls inside one of the three rings,
+    which together span roughly 0 to 45 degrees. A surface steeper than that
+    reflects away from the camera and reads dark whatever it is made of. So this
+    does not measure "solder is present" -- it measures "a specular surface
+    lying at a shallow enough angle to be seen is present, outside the land".
+    A balled joint's near-vertical rim is genuinely invisible here, and the
+    signal is the shoulder inboard of it.
+    """
+    out = np.zeros(len(pkg.lands()), np.float32)
+    for i, (centre, half) in enumerate(spill_boxes(pkg)):
+        ys, xs = roi.local_box_px(centre, half, region.shape)
+        win = region[ys, xs]
+        if win.size == 0:
+            continue
+        out[i] = float((specular_max(win) > metal_min).mean())
     return out
 
 
@@ -408,6 +471,7 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
         m.bands = band_fractions(region, pkg)
         m.ncc = m.dx_um = m.dy_um = m.dtheta_deg = float("nan")
         m.pol_margin = m.contrast_ratio = m.band_maha = float("nan")
+        m.spill_worst = float("nan")
         m.body_area_ratio = m.body_aspect = m.body_shift_um = float("nan")
         m.body_clipped = float("nan")
         return m
@@ -440,6 +504,14 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
     # fillet windows follow the lands, which do not move with the body
     m.bands = band_fractions(region, pkg)
     m.band_maha = float(band_distance(m.bands, g).max())
+
+    # Solder outside the land, over and above whatever a good joint of this
+    # package shows there. Zero on a good board; positive means solder spread
+    # past the copper it was meant to stay on.
+    n = min(len(g.spill_mean), len(pkg.lands()))
+    m.spill = (spill_fractions(region, pkg, g.body_spec_max)[:n]
+               - np.asarray(g.spill_mean[:n], np.float32))
+    m.spill_worst = float(m.spill.max()) if m.spill.size else 0.0
 
     blob = body_blob(region, g.body_spec_max, g.body_dif_min)
     m.body_area_ratio = blob.area_px / max(g.body_area_px, 1.0)
@@ -509,6 +581,12 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
         dif_min = (float(np.mean(d["df_body"])) + float(np.mean(d["df_sub"]))) / 2.0
         blobs = [body_blob(r, spec_max, dif_min) for r in d["reg"]]
         blobs = [b for b in blobs if b.found]
+        # Same threshold, used from the other side: below it is body, marking or
+        # substrate, above it is metal. Measured here rather than in the pass
+        # above because the level is only known once every golden board has
+        # contributed to it.
+        spill = np.mean([spill_fractions(r, pkg_obj, spec_max) for r in d["reg"]],
+                        axis=0)
 
         out.packages[name] = GoldenPackage(
             template=tpl,
@@ -518,6 +596,7 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
             body_mask=body_mask_for(body, pkg_obj),
             band_mean=bands.mean(axis=0),
             band_std=np.maximum(bands.std(axis=0), 0.01),
+            spill_mean=spill,
             band_cov_inv=np.stack([_band_cov_inv(bands[:, pad, :])
                                    for pad in range(bands.shape[1])]),
             gap_mean=float(np.mean(d["gap"])), gap_std=float(max(np.std(d["gap"]), 0.01)),
