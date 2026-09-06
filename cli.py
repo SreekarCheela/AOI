@@ -387,8 +387,18 @@ def cmd_shots(a: argparse.Namespace) -> None:
 
     gamma = None if a.linear else a.gamma
     print(f"\nlinearising with gamma {gamma}" if gamma else "\ntreating input as linear")
-    stack = capture.build_stack(shots, gamma=gamma, do_align=not a.no_align)
-    print(f"stack {stack.shape}")
+    shifts: list = []
+    stack = capture.build_stack(shots, gamma=gamma, do_align=not a.no_align,
+                                shifts_out=shifts)
+    if shifts:
+        print("\nregistration (each frame onto the first):")
+        for ch, dx, dy, ok in shifts:
+            note = "" if ok else "   REFUSED, too large to be a tripod nudge -- frame left as shot"
+            print(f"  {ch:8} dx={dx:+7.2f} dy={dy:+7.2f} px{note}")
+        if any(not ok for *_, ok in shifts):
+            print("  A refused frame is still in the stack, unregistered. Reshoot it,")
+            print("  or pass --no-align if the camera genuinely did not move.")
+    print(f"\nstack {stack.shape}")
     for i, ch in enumerate(config.CHANNELS):
         v = stack[..., i]
         print(f"  {ch:8} mean {v.mean():6.1f}   p99 {np.percentile(v, 99):6.1f}")

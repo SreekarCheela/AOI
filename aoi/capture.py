@@ -62,31 +62,86 @@ def load_image(path: str | Path, gamma: float | None = None) -> np.ndarray:
     return a
 
 
+# A tripod nudge or a mirror slap moves a frame by a few pixels. A three-figure
+# answer is not a nudge, it is the correlation having failed, and applying it
+# would take a frame that was very nearly right and destroy it. Refuse instead,
+# and say so -- a frame left unaligned is recoverable, one warped by 1600 px is
+# not.
+MAX_ALIGN_SHIFT_PX = 64.0
+
+
+def _prep(a: np.ndarray) -> np.ndarray:
+    """Reduce a frame to the structure that every frame shares.
+
+    Phase correlation assumes the two images look alike. These do not, and that
+    is the entire difficulty: each angled frame lights a different slope band,
+    so a fillet blazing in the low frame is dark in the high one. The specular
+    highlights are the brightest thing in the picture and therefore dominate any
+    gradient, yet they are exactly the part that MOVES between frames rather
+    than staying put. Correlating on them locks onto a wrong peak -- measured on
+    a 54-component board, 4.7 px of error between low and mid and 10.7 px
+    between low and high, silently, with a correlation response no worse than
+    the correct answers scored.
+
+    What every frame does share is the diffuse part of the scene: soldermask,
+    silkscreen, component bodies. They are lit at every lamp elevation, only
+    faintly. Two steps bring them out.
+
+    Normalise each frame by its own high percentile first. The lamp is moved
+    between shots, so the frames genuinely differ in overall brightness by three
+    to four times, and the log below is not scale invariant -- without this the
+    same scene compresses differently in each frame and the error comes back
+    (measured 4.6 px). Percentile rather than max because one blown highlight
+    would otherwise set the scale for the whole frame.
+
+    Then compress. Log squashes the specular highlights into a narrow band at
+    the top while stretching the faint diffuse detail underneath, so the
+    gradient that follows is driven by structure that is present in every frame.
+    """
+    scale = float(np.percentile(a, 99.5))
+    b = np.log1p(a / max(scale, 1e-6) * 50.0)
+    b = cv2.GaussianBlur(b, (0, 0), 1.2)
+    m = cv2.magnitude(cv2.Sobel(b, cv2.CV_32F, 1, 0, ksize=3),
+                      cv2.Sobel(b, cv2.CV_32F, 0, 1, ksize=3))
+    return (m - m.mean()) / (m.std() + 1e-8)
+
+
 def _shift(ref: np.ndarray, img: np.ndarray) -> tuple[float, float]:
     """Translation between two frames, robust to them being lit differently."""
-    def prep(a):
-        a = cv2.GaussianBlur(a, (0, 0), 1.2)
-        gx = cv2.Sobel(a, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(a, cv2.CV_32F, 0, 1, ksize=3)
-        m = cv2.magnitude(gx, gy)
-        return (m - m.mean()) / (m.std() + 1e-8)
-    (dx, dy), _ = cv2.phaseCorrelate(prep(ref).astype(np.float64),
-                                     prep(img).astype(np.float64))
+    (dx, dy), _ = cv2.phaseCorrelate(
+        np.ascontiguousarray(_prep(ref), np.float64),
+        np.ascontiguousarray(_prep(img), np.float64))
     return float(dx), float(dy)
 
 
-def align(images: list[np.ndarray], enable: bool = True) -> list[np.ndarray]:
+def align(images: list[np.ndarray], enable: bool = True,
+          max_shift_px: float = MAX_ALIGN_SHIFT_PX
+          ) -> tuple[list[np.ndarray], list[tuple[float, float, bool]]]:
+    """Register frames onto the first one.
+
+    Returns the frames and, per frame, the (dx, dy) measured and whether it was
+    applied. The caller is expected to show that: misregistration is the failure
+    mode of this whole method that does not announce itself -- the false-colour
+    image just looks smeared, and the natural conclusion is that the optics do
+    not work rather than that the frames do not line up.
+    """
     if not enable or len(images) < 2:
-        return images
+        return images, [(0.0, 0.0, False)] * len(images)
     ref = images[0]
     out = [ref]
+    shifts: list[tuple[float, float, bool]] = [(0.0, 0.0, True)]
     for img in images[1:]:
         dx, dy = _shift(ref, img)
+        ok = abs(dx) <= max_shift_px and abs(dy) <= max_shift_px
+        shifts.append((dx, dy, ok))
+        if not ok:
+            out.append(img)
+            continue
         M = np.array([[1.0, 0.0, -dx], [0.0, 1.0, -dy]], np.float64)
         out.append(cv2.warpAffine(img, M, (ref.shape[1], ref.shape[0]),
                                   flags=cv2.INTER_LINEAR,
                                   borderMode=cv2.BORDER_REPLICATE))
-    return out
+    return out, shifts
 
 
 def find_shots(folder: str | Path) -> dict[str, Path]:
@@ -104,8 +159,13 @@ def find_shots(folder: str | Path) -> dict[str, Path]:
 
 
 def build_stack(shots: dict[str, Path], gamma: float | None = 2.2,
-                do_align: bool = True, normalise: bool = True) -> np.ndarray:
-    """Photographs -> (H, W, 4) uint8 stack, ordered as config.CHANNELS."""
+                do_align: bool = True, normalise: bool = True,
+                shifts_out: list | None = None) -> np.ndarray:
+    """Photographs -> (H, W, 4) uint8 stack, ordered as config.CHANNELS.
+
+    Pass a list as `shifts_out` to receive one (channel, dx, dy, applied) tuple
+    per frame, so the caller can show what registration actually did.
+    """
     order = [c for c in config.CHANNELS if c in shots]
     if not order:
         raise ValueError("no frames matched a channel name")
@@ -114,7 +174,9 @@ def build_stack(shots: dict[str, Path], gamma: float | None = 2.2,
     h = min(i.shape[0] for i in imgs)
     w = min(i.shape[1] for i in imgs)
     imgs = [i[:h, :w] for i in imgs]
-    imgs = align(imgs, do_align)
+    imgs, shifts = align(imgs, do_align)
+    if shifts_out is not None:
+        shifts_out.extend((c, dx, dy, ok) for c, (dx, dy, ok) in zip(order, shifts))
 
     if normalise:
         # One common scale across channels -- scaling each on its own would
