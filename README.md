@@ -573,6 +573,18 @@ Pi constraints carried over from the spec: USB3 camera rather than GigE
 board), accelerator on the single PCIe lane with storage on USB3, and training
 stays on the workstation.
 
+## The physics gate
+
+Everything below and above this line is validated against a renderer built from
+the same equations the tests measure. That proves the logic and the wiring; it
+says nothing about whether real solder behaves this way. `aoi/capture.py` exists
+to answer that and has never been run on a real photograph.
+
+**`docs/physics-gate-shoot.md` is the checklist** — a camera on a tripod, one
+lamp, a scrap reflowed board with one hand-starved joint, four frames, and
+`python cli.py shots --dir photos/`. A weekend, and the last cheap chance to
+find out the optical design needs rethinking before the optics are bought.
+
 ## Registering frames that do not look alike
 
 The prototype shoot is a camera on a tripod and one lamp moved between frames,

@@ -126,7 +126,10 @@ def align(images: list[np.ndarray], enable: bool = True,
     not work rather than that the frames do not line up.
     """
     if not enable or len(images) < 2:
-        return images, [(0.0, 0.0, False)] * len(images)
+        # No shifts, rather than a list of refusals: nothing was rejected here,
+        # registration simply was not attempted, and the caller must be able to
+        # tell those apart before it warns anybody about a frame.
+        return images, []
     ref = images[0]
     out = [ref]
     shifts: list[tuple[float, float, bool]] = [(0.0, 0.0, True)]

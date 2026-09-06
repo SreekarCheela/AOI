@@ -168,7 +168,10 @@ def test_alignment_can_be_turned_off(frames):
     imgs = [frames[c] for c in order]
     out, shifts = capture.align(imgs, enable=False)
     assert all(a is b for a, b in zip(out, imgs)), "frames were touched"
-    assert not any(ok for *_, ok in shifts)
+    assert shifts == [], (
+        "disabled alignment reported per-frame shifts. A caller cannot then "
+        "tell 'not attempted' from 'attempted and refused', and will warn about "
+        "frames that are perfectly fine")
 
 
 # ---------------------------------------------------------------- end to end
