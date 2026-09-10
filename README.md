@@ -41,7 +41,7 @@ enough to run on a Pi.
 | `cli.py review` | operator review screen for the last board |
 | `cli.py yield` | per-package false call rate and review time |
 | `cli.py shots --dir photos/` | turn real photographs into a channel stack — the physics gate |
-| `cli.py calibrate <image>` | measure µm/px from a dot-grid target instead of assuming it |
+| `cli.py calibrate <image>` | measure µm/px and lens distortion from a dot-grid target |
 
 `demo` takes `--backend none|torch|onnx`. The rule layer works with `none`, so
 the pipeline is useful before anything is trained.
@@ -154,7 +154,7 @@ full:
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest        # 375 passing, ~100 s
+.venv/bin/python -m pytest        # 395 passing, ~105 s
 ```
 
 Every design note above has tests behind it, named for what they pin rather

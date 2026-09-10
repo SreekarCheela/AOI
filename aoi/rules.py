@@ -100,6 +100,12 @@ class GoldenPackage:
     # what a correctly placed body of this package measures.
     body_spec_max: float = 0.19
     body_dif_min: float = 0.23
+    # The bare-substrate diffuse level those two thresholds were learned at.
+    # Both are ABSOLUTE levels, so dimming the whole image erodes the blob edge
+    # and shrinks the measured body -- the same common-mode sensitivity the
+    # fillet test was rebuilt to avoid. Carrying the level the thresholds belong
+    # to lets `measure` rescale them against the crop in front of it.
+    body_sub_level: float = 0.20
     body_len_mm: float = 1.0     # diagnostics and reporting only
     body_width_mm: float = 1.0   # extent ACROSS the pad axis; a body standing on
                                  # one land spans exactly this along the axis
@@ -621,12 +627,35 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden,
     # Solder outside the land, over and above whatever a good joint of this
     # package shows there. Zero on a good board; positive means solder spread
     # past the copper it was meant to stay on.
+    # Rescale the segmentation thresholds to the light actually in this crop.
+    #
+    # Both are absolute levels fixed at teach, so anything that changes overall
+    # brightness -- vignetting, LED ageing, a different board finish -- moves the
+    # image away from them and the blob edge erodes. The body then measures
+    # smaller than it is, and `wrong_part` reads a good part as a substitution:
+    # measured before this, a SOD-123 under an 8% dim came back at x0.802 of
+    # golden area against a lower bound of x0.72, so roughly a 10% dim was the
+    # whole margin.
+    #
+    # The crop's own bare substrate is the reference, and teach already measured
+    # it. This is the same defence the fillet test gets from scoring all three
+    # bands jointly: make the test care about the RATIO the picture shows, not
+    # about the absolute number it happened to be taught.
+    dif_now = float(np.percentile(_norm(region[..., dif]), 5))
+    gain = dif_now / max(g.body_sub_level, 1e-6)
+    # Bounded. Beyond this the crop is not dim, it is wrong -- a component
+    # sitting over a copper pour, or a crop half off the image -- and rescaling
+    # to match it would hide that rather than measure it.
+    gain = float(np.clip(gain, config.BODY_GAIN_MIN, config.BODY_GAIN_MAX))
+    spec_max_now = g.body_spec_max * gain
+    dif_min_now = g.body_dif_min * gain
+
     n = min(len(g.spill_mean), len(pkg.lands()))
-    m.spill = (spill_fractions(region, pkg, g.body_spec_max)[:n]
+    m.spill = (spill_fractions(region, pkg, spec_max_now)[:n]
                - np.asarray(g.spill_mean[:n], np.float32))
     m.spill_worst = float(m.spill.max()) if m.spill.size else 0.0
 
-    blob = body_blob(region, g.body_spec_max, g.body_dif_min)
+    blob = body_blob(region, spec_max_now, dif_min_now)
     m.body_area_ratio = blob.area_px / max(g.body_area_px, 1.0)
     # Normalised by the body's own WIDTH, not its length. A part standing on one
     # land spans exactly its width along the pad axis, whatever package it is, so
@@ -789,6 +818,7 @@ def fit_golden(stacks: list[np.ndarray], board: Board,
             ncc_std=float(np.std(nccs)) if nccs else 0.0,
             body_spec_max=spec_max,
             body_dif_min=dif_min,
+            body_sub_level=float(np.mean(d["df_sub"])),
             body_len_mm=float(np.mean([b.length_mm for b in blobs])) if blobs else 1.0,
             body_width_mm=float(np.mean([b.width_mm for b in blobs])) if blobs else 1.0,
             body_area_px=float(np.mean([b.area_px for b in blobs])) if blobs else 1.0,

@@ -15,12 +15,29 @@ Area is a bulk statistic and is invariant to rotation.
 
 Bounds are ×0.72 and ×1.12. They are asymmetric because the good side is: the
 low tail is entirely one case, a SOD-123 at ×0.802 with LED output down 8 %.
-`body_dif_min` is an absolute diffuse level learned at teach, so dimming the
-whole image erodes the blob edge and shrinks the measured body. That is the same
-common-mode sensitivity the fillet test was rebuilt to avoid, and this test does
-not yet have the same defence — roughly a 10 % dim is the limit. The fix is to
-scale both segmentation thresholds by the crop's own substrate level, which
-teach already measures.
+`body_dif_min` and `body_spec_max` are absolute levels learned at teach, so
+dimming the whole image erodes the blob edge and shrinks the measured body. That
+was the same common-mode sensitivity the fillet test was rebuilt to avoid, and
+roughly a 10 % dim was the limit.
+
+**Fixed 10 September**, the way the note above said it should be: both
+thresholds are now scaled by the crop's own bare-substrate level, which teach
+already measures. Measured over a 54-component board, counting good parts read
+as substitutions:
+
+| LED gain | absolute thresholds | scaled to the crop |
+|---|---|---|
+| 1.00 | 0 | 0 |
+| 0.92 | **2 false calls** | 0 |
+| 0.84 | **24 false calls** | 0 |
+| 0.75 | **24 false calls** | 0 |
+| 1.30 | **24 false calls** | 0 |
+
+The measured area ratio now sits between ×0.956 and ×1.025 across that whole
+range, against bounds of ×0.72 and ×1.12 — so the bounds are no longer being
+defended by the illumination staying still. The scaling is bounded either way:
+a crop that is not merely dim, but wrong — a part over a copper pour, a crop
+half off the image — has to be measured rather than accommodated.
 
 The test sits with presence, not with joint quality, because it decides whether
 the golden model may be applied at all: every test after it compares against

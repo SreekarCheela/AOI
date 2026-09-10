@@ -292,6 +292,14 @@ WRONG_PART_AREA_HI: float = 1.12
 # bare copper left to sample and a midpoint rule collapses onto the body level.
 BODY_SPECULAR_MULT: float = 2.2
 
+# Bounds on the rescaling that keeps body segmentation working under changed
+# illumination. Wide enough to cover any dimming or brightening the machine
+# should ever see, narrow enough that a crop which is not merely dim -- a part
+# over a copper pour, a crop half off the image -- is measured rather than
+# accommodated.
+BODY_GAIN_MIN: float = 0.5
+BODY_GAIN_MAX: float = 2.0
+
 # Blob area as a fraction of the golden blob. Below this there is no body in the
 # crop at all. Measured: a missing part scores 0.00 (no component survives the
 # open), the smallest real body is a tombstoned 0402 at 0.29.

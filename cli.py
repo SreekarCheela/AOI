@@ -448,6 +448,18 @@ def cmd_calibrate(a: argparse.Namespace) -> None:
         return
 
     print(f"  {cal.report()}")
+
+    try:
+        dist = calibrate.measure_distortion(img)
+        print(f"  {dist.report()}")
+        if not dist.meets_spec:
+            print(f"\n  Distortion is over the 0.5 px the Phase 1 exit criterion "
+                  f"allows.\n  Correct it with calibrate.undistort() before "
+                  f"measuring anything in microns,\n  or the error grows toward "
+                  f"the corners of every tile.")
+    except calibrate.CalibrationError as e:
+        print(f"  distortion not fitted: {e}")
+
     off = abs(cal.deviation)
     if off > 0.02:
         print(f"\n  {off:.1%} from the design intent. Every micron this machine "

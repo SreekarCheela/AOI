@@ -268,3 +268,80 @@ def test_no_false_wrong_part_calls_on_good_leaded_parts(leaded):
             if rule_verdict(m, golden).reason == "wrong_part":
                 flagged.append((c.refdes, round(m.body_area_ratio, 3)))
     assert not flagged, f"false 'wrong_part' calls on good leaded parts: {flagged}"
+
+
+# ------------------------------------- illumination robustness, added 10 Sep
+def _worst_ratio_and_calls(brd, golden, gain):
+    st = synth.render(brd, opts=synth.RenderOpts(seed=7, gain=gain))
+    ratios, calls = [], 0
+    for c in brd.components:
+        m = rules.measure(st, c, golden)
+        if not np.isfinite(m.body_area_ratio):
+            continue
+        ratios.append(m.body_area_ratio)
+        if not (config.WRONG_PART_AREA_LO <= m.body_area_ratio
+                <= config.WRONG_PART_AREA_HI):
+            calls += 1
+    return min(ratios), calls
+
+
+@pytest.fixture(scope="module")
+def dim_board():
+    brd = B.random_board(30.0, 22.0, seed=1)
+    golden = rules.fit_golden(
+        [synth.render(brd, opts=synth.RenderOpts(seed=100 + i)) for i in range(6)], brd)
+    return brd, golden
+
+
+@pytest.mark.parametrize("gain", [0.75, 0.84, 0.92, 1.00, 1.15, 1.30])
+def test_the_body_measures_the_same_under_changed_illumination(dim_board, gain):
+    """The segmentation thresholds are absolute levels learned at teach, so
+    anything that changes overall brightness moves the image away from them and
+    erodes the blob edge. The body then measures smaller than it is and a good
+    part reads as a substitution.
+
+    The defence is the same one the fillet test gets: make the measurement care
+    about the ratio the picture shows rather than the absolute number it was
+    taught. The crop's own bare substrate is the reference, and teach already
+    measured it.
+    """
+    brd, golden = dim_board
+    worst, calls = _worst_ratio_and_calls(brd, golden, gain)
+    assert calls == 0, (
+        f"LED gain {gain}: {calls} good part(s) read as the wrong part, worst "
+        f"area ratio {worst:.3f} against a lower bound of "
+        f"{config.WRONG_PART_AREA_LO}")
+    assert worst > 0.9, (
+        f"LED gain {gain}: worst area ratio {worst:.3f} -- the rescaling is "
+        f"holding the verdict but the measurement is still drifting")
+
+
+def test_without_the_rescaling_a_modest_dim_breaks_the_test(dim_board):
+    """The failure this defends against, measured rather than asserted. Pinning
+    it keeps the rescaling justified: if this ever stops failing, the absolute
+    thresholds are sufficient again and the extra machinery can go.
+
+    Measured: an 8% dim produced 2 false calls and a 16% dim produced 24 of a
+    54-component board -- effectively every part.
+    """
+    brd, golden = dim_board
+    lo, hi = config.BODY_GAIN_MIN, config.BODY_GAIN_MAX
+    config.BODY_GAIN_MIN = config.BODY_GAIN_MAX = 1.0       # pin -> no rescaling
+    try:
+        _, at_92 = _worst_ratio_and_calls(brd, golden, 0.92)
+        _, at_84 = _worst_ratio_and_calls(brd, golden, 0.84)
+    finally:
+        config.BODY_GAIN_MIN, config.BODY_GAIN_MAX = lo, hi
+
+    assert at_92 > 0, ("an 8% dim no longer breaks the unrescaled test, so the "
+                       "rescaling can no longer be justified from measurement")
+    assert at_84 > 10, (f"a 16% dim produced only {at_84} false calls unrescaled; "
+                        f"this test is not reproducing the failure it describes")
+
+
+def test_the_rescaling_is_bounded(dim_board):
+    """A crop that is not merely dim -- a part over a copper pour, a crop half
+    off the image -- must be measured rather than accommodated."""
+    assert config.BODY_GAIN_MIN < 1.0 < config.BODY_GAIN_MAX
+    assert config.BODY_GAIN_MIN >= 0.25 and config.BODY_GAIN_MAX <= 4.0, (
+        "the gain bounds are wide enough to normalise away a genuinely wrong crop")

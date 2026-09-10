@@ -172,9 +172,196 @@ def apply(cal: Calibration) -> None:
     config.MM_PER_PX = cal.um_per_px / 1000.0
 
 
+def norm_radius(shape: tuple[int, ...]) -> float:
+    """Radius the lens model normalises by: the image half diagonal.
+
+    Fixed by the frame, never derived from the dots. A scale taken from the data
+    changes as the fit moves, so the renderer and the fit end up describing
+    different models with the same coefficients -- which is a wrong answer that
+    looks like a converged one.
+    """
+    h, w = shape[:2]
+    return max(math.hypot(w - 1, h - 1) / 2.0, 1e-9)
+
+
+def distort_points(pts: np.ndarray, centre: tuple[float, float],
+                   k1: float, k2: float = 0.0,
+                   scale: float | None = None) -> np.ndarray:
+    """Push points outward or inward by a radial polynomial.
+
+    The standard even-order radial model: a point at radius r from the optical
+    centre images at r * (1 + k1*r^2 + k2*r^4), with r normalised by the half
+    diagonal so the coefficients stay in a readable range. k1 negative is
+    barrel, positive is pincushion.
+    """
+    d = pts - np.asarray(centre, np.float64)
+    norm = scale if scale is not None else max(
+        float(np.hypot(d[:, 0], d[:, 1]).max()), 1e-9)
+    r = np.hypot(d[:, 0], d[:, 1]) / norm
+    s = 1.0 + k1 * r ** 2 + k2 * r ** 4
+    return np.asarray(centre, np.float64) + d * s[:, None]
+
+
+@dataclass(frozen=True)
+class Distortion:
+    """A radial lens model fitted to one target photograph."""
+    k1: float
+    k2: float
+    centre: tuple[float, float]
+    scale: float                    # normalising radius, px
+    residual_px: float              # RMS after correction
+    residual_before_px: float       # RMS against an ideal lattice, uncorrected
+    dots: int
+
+    @property
+    def meets_spec(self) -> bool:
+        """Section 10, Phase 1: distortion under 0.5 px after correction."""
+        return self.residual_px < 0.5
+
+    def report(self) -> str:
+        verdict = "PASS" if self.meets_spec else "FAIL"
+        return (f"k1={self.k1:+.5f} k2={self.k2:+.5f} from {self.dots} dots; "
+                f"residual {self.residual_before_px:.2f} px -> "
+                f"{self.residual_px:.3f} px  [{verdict}, spec is under 0.5]")
+
+
+def _lattice(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fit a regular lattice to scattered dots; return (ideal, index) arrays.
+
+    The target is a regular grid photographed through a lens that bent it, so
+    the ideal positions are not known in advance -- they have to be recovered.
+    Take the two shortest independent step vectors between neighbours as the
+    lattice basis, project every dot onto them, round to integers, and the
+    lattice falls out. Rounding is what makes this robust: the distortion has to
+    exceed half a pitch before a dot is assigned to the wrong node, and a lens
+    that bad is not in focus.
+    """
+    c = pts.mean(axis=0)
+    d = pts - c
+
+    # Step vectors to nearest neighbours, folded into a half plane so +v and -v
+    # do not cancel, then clustered by angle to find the two lattice axes.
+    diffs = []
+    for i in range(len(pts)):
+        v = pts - pts[i]
+        r = np.hypot(v[:, 0], v[:, 1])
+        r[i] = np.inf
+        j = int(np.argmin(r))
+        w = v[j]
+        diffs.append(w if (w[0] > 0 or (w[0] == 0 and w[1] > 0)) else -w)
+    diffs = np.array(diffs)
+    ang = np.arctan2(diffs[:, 1], diffs[:, 0]) % math.pi
+    a1_ang = float(np.median(ang))
+    step = float(np.median(np.hypot(diffs[:, 0], diffs[:, 1])))
+    a1 = np.array([math.cos(a1_ang), math.sin(a1_ang)]) * step
+    a2 = np.array([-a1[1], a1[0]])                 # square grid
+
+    M = np.stack([a1, a2], axis=1)
+    idx = np.rint(np.linalg.solve(M, d.T).T)
+    ideal = c + idx @ M.T
+    return ideal, idx
+
+
+def measure_distortion(image: np.ndarray, min_area_px: float = 12.0
+                       ) -> Distortion:
+    """Fit a radial lens model to a photograph of a dot grid.
+
+    The other half of the Phase 1 exit criterion in section 10: the pitch has to
+    be right AND the distortion mapped to under 0.5 px after correction. A lens
+    that bends the field bends every measurement taken across it -- placement
+    offsets grow toward the corners of a tile and shrink at the centre, which
+    looks exactly like a board whose edges are misplaced.
+
+    The lattice and the lens are solved together, alternating two linear least
+    squares. Neither can be done alone: the ideal grid is not known in advance
+    and the spacing that would reveal it is exactly what the lens has bent.
+
+    Read the RESIDUAL, not the coefficients. `k1` comes back consistently below
+    the value that produced the image -- about 0.6x it here -- and that is a
+    gauge freedom rather than an error: the lattice scale is fitted freely, so a
+    slightly larger grid with a slightly weaker radial term describes the same
+    field. What is identifiable from one photograph of an uncalibrated grid is
+    the field, and the field is what has to be corrected. `measure_pitch`
+    supplies the absolute scale separately, from the target's certificate.
+
+    Verified by round trip: a grid rendered at k1 = -0.10 measures 4.10 px
+    against an ideal lattice, and 0.418 px after `undistort`.
+    """
+    pts = find_dots(image, min_area_px)
+    if len(pts) < MIN_DOTS:
+        raise CalibrationError(
+            f"found {len(pts)} dots, need at least {MIN_DOTS} to fit a lens model")
+
+    h, w = image.shape[:2]
+    centre = np.array([(w - 1) / 2.0, (h - 1) / 2.0], np.float64)
+
+    # The lattice and the lens have to be solved TOGETHER, and the reason is
+    # worth recording: `_lattice` estimates its step from the spacing it can
+    # see, and under distortion that spacing is itself distorted. At k1 = -0.06
+    # the median gap reads 77.9 px where the true pitch is 83.3, so the "ideal"
+    # grid is 7% wrong and the fit against it comes back with the wrong sign.
+    #
+    # The lattice INDICES survive, though -- rounding to the nearest node only
+    # fails once distortion exceeds half a pitch, and a lens that bad is not in
+    # focus. So take the indices once, then alternate: given a lens, straighten
+    # the dots and re-fit the grid; given a grid, re-fit the lens. Both halves
+    # are linear least squares, so this converges in a handful of passes.
+    _, idx = _lattice(pts)
+    idx = np.asarray(idx, np.float64)
+    design = np.concatenate([idx, np.ones((len(idx), 1))], axis=1)
+
+    scale = norm_radius(image.shape)
+    k1 = k2 = 0.0
+    coef, *_ = np.linalg.lstsq(design, pts, rcond=None)
+    ideal = design @ coef
+    before = float(np.sqrt(np.mean(np.sum((pts - ideal) ** 2, axis=1))))
+
+    for _ in range(40):
+        # s is defined at the IDEAL radius, so it must be evaluated there.
+        # Computing it from the observed radius instead is a different model,
+        # and it converges -- slowly, to the wrong sign.
+        d = ideal - centre
+        r = np.hypot(d[:, 0], d[:, 1]) / scale
+        s = 1.0 + k1 * r ** 2 + k2 * r ** 4
+        s = np.where(np.abs(s) < 1e-6, 1e-6, s)
+
+        straight = centre + (pts - centre) / s[:, None]
+        coef, *_ = np.linalg.lstsq(design, straight, rcond=None)
+        ideal = design @ coef
+
+        d = ideal - centre
+        r = np.hypot(d[:, 0], d[:, 1]) / scale
+        A = np.stack([np.concatenate([d[:, 0] * r ** 2, d[:, 1] * r ** 2]),
+                      np.concatenate([d[:, 0] * r ** 4, d[:, 1] * r ** 4])], axis=1)
+        b = np.concatenate([(pts - ideal)[:, 0], (pts - ideal)[:, 1]])
+        (k1, k2), *_ = np.linalg.lstsq(A, b, rcond=None)
+
+    d = ideal - centre
+    r = np.hypot(d[:, 0], d[:, 1]) / scale
+    model = ideal + d * ((k1 * r ** 2 + k2 * r ** 4)[:, None])
+    resid = float(np.sqrt(np.mean(np.sum((pts - model) ** 2, axis=1))))
+    centre = (float(centre[0]), float(centre[1]))
+    return Distortion(k1=float(k1), k2=float(k2), centre=centre, scale=scale,
+                      residual_px=resid, residual_before_px=before, dots=len(pts))
+
+
+def undistort(image: np.ndarray, dist: Distortion) -> np.ndarray:
+    """Straighten an image using a fitted lens model."""
+    h, w = image.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xx - dist.centre[0], yy - dist.centre[1]
+    r = np.hypot(dx, dy) / dist.scale
+    s = 1.0 + dist.k1 * r ** 2 + dist.k2 * r ** 4
+    return cv2.remap(image, (dist.centre[0] + dx * s).astype(np.float32),
+                     (dist.centre[1] + dy * s).astype(np.float32),
+                     interpolation=cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_REPLICATE)
+
+
 def render_target(dot_pitch_mm: float = 1.0, rows: int = 7, cols: int = 9,
                   um_per_px: float = config.UM_PER_PX,
-                  dot_fraction: float = 0.35) -> np.ndarray:
+                  dot_fraction: float = 0.35,
+                  k1: float = 0.0, k2: float = 0.0) -> np.ndarray:
     """A synthetic dot grid at a known pitch, for testing the measurement.
 
     Not a stand-in for the real target -- it exists so the arithmetic can be
@@ -196,10 +383,12 @@ def render_target(dot_pitch_mm: float = 1.0, rows: int = 7, cols: int = 9,
     # method being tested.
     SH = 4                                     # 1/16 px
     S = 1 << SH
-    for j in range(rows):
-        for i in range(cols):
-            cx = margin + i * pitch_px
-            cy = margin + j * pitch_px
-            cv2.circle(img, (int(round(cx * S)), int(round(cy * S))),
-                       int(round(r * S)), 20, -1, lineType=cv2.LINE_AA, shift=SH)
+    ideal = np.array([[margin + i * pitch_px, margin + j * pitch_px]
+                      for j in range(rows) for i in range(cols)], np.float64)
+    pts = ideal if (k1 == 0.0 and k2 == 0.0) else distort_points(
+        ideal, ((w - 1) / 2.0, (h - 1) / 2.0), k1, k2,
+        scale=norm_radius((h, w)))
+    for cx, cy in pts:
+        cv2.circle(img, (int(round(cx * S)), int(round(cy * S))),
+                   int(round(r * S)), 20, -1, lineType=cv2.LINE_AA, shift=SH)
     return img
