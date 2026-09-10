@@ -385,6 +385,13 @@ def cmd_shots(a: argparse.Namespace) -> None:
     if missing:
         print(f"  missing angled frames: {', '.join(missing)} -- results will be partial")
 
+    # Check before doing any work. Loading two JPEGs and then failing on the
+    # third frame because it is a DNG wastes the time and buries the reason.
+    raw = [p for p in shots.values() if p.suffix.lower() in capture.RAW_EXT]
+    if raw and not capture.have_rawpy():
+        print("\n" + capture.RAW_HELP.format(name=raw[0].name))
+        return
+
     gamma = None if a.linear else a.gamma
     print(f"\nlinearising with gamma {gamma}" if gamma else "\ntreating input as linear")
     shifts: list = []

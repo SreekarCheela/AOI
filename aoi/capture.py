@@ -29,6 +29,23 @@ from . import config
 RAW_EXT = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".rw2", ".dng", ".orf", ".pef"}
 LDR_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
+RAW_HELP = (
+    "{name} is a RAW file, and reading RAW needs rawpy, which is not installed.\n"
+    "\n"
+    "  pip install rawpy        then re-run with --linear\n"
+    "\n"
+    "Or shoot JPEG instead. `cli.py shots` defaults to --gamma 2.2, which is the\n"
+    "right correction for camera and phone JPEG, and the gate is judged by eye,\n"
+    "so RAW buys little here beyond skipping that one step."
+)
+
+
+def have_rawpy() -> bool:
+    """Whether RAW frames can be read. Checked up front so a shoot fails on the
+    first line rather than after loading the frames that happened to be JPEG."""
+    import importlib.util
+    return importlib.util.find_spec("rawpy") is not None
+
 
 def load_image(path: str | Path, gamma: float | None = None) -> np.ndarray:
     """Read one frame as a linear float greyscale image in [0, 1].
@@ -40,7 +57,16 @@ def load_image(path: str | Path, gamma: float | None = None) -> np.ndarray:
     ext = path.suffix.lower()
 
     if ext in RAW_EXT:
-        import rawpy
+        # rawpy is deliberately NOT a hard dependency. It builds against libraw,
+        # and it is needed only for the physics gate -- a one-off weekend shoot.
+        # Making every install carry a native build for that is the wrong trade,
+        # and a build failure would break the README's one-command quickstart for
+        # someone who only wants to run the pipeline. So it is optional, and this
+        # is the message that says so rather than a bare ModuleNotFoundError.
+        try:
+            import rawpy
+        except ImportError as exc:
+            raise ImportError(RAW_HELP.format(name=path.name)) from exc
         with rawpy.imread(str(path)) as raw:
             rgb = raw.postprocess(gamma=(1, 1), no_auto_bright=True,
                                   output_bps=16, use_camera_wb=True)

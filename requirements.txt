@@ -12,3 +12,10 @@ pillow==12.3.0
 
 # test-only
 pytest==8.4.2
+
+# optional -- only for reading RAW/DNG frames in `cli.py shots` (the physics
+# gate). Left out of the pinned set on purpose: it builds against libraw, and a
+# native build failure would break the quickstart for someone who only wants to
+# run the pipeline. Shooting JPEG needs nothing extra. Install it if you shoot
+# RAW:
+#   pip install rawpy

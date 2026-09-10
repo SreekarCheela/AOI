@@ -16,6 +16,8 @@ line up" -- which would be an expensive conclusion to draw wrongly.
 """
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import cv2
 import pytest
@@ -274,3 +276,36 @@ def test_a_missing_diffuse_frame_is_synthesised(tmp_path, shoot_stack):
     assert stack.shape[2] == len(config.CHANNELS)
     assert stack[..., config.CHANNELS.index("diffuse")].max() > 0, \
         "no diffuse frame was synthesised, so the body template has nothing to work from"
+
+
+def test_a_raw_frame_without_rawpy_says_what_to_do(tmp_path, monkeypatch):
+    """rawpy is optional, so a DNG off a phone is a normal thing to arrive with
+    and a bare ModuleNotFoundError is the wrong answer to it.
+
+    Simulated rather than skipped when rawpy IS installed: the message is what
+    the person standing over the board reads, so it has to be pinned on every
+    machine, not only on the ones that happen to lack the package.
+    """
+    monkeypatch.setitem(sys.modules, "rawpy", None)      # makes `import rawpy` fail
+    dng = tmp_path / "low.dng"
+    dng.write_bytes(b"not really a dng")
+
+    with pytest.raises(ImportError) as e:
+        capture.load_image(dng)
+
+    msg = str(e.value)
+    assert "low.dng" in msg, "the message does not say which file it choked on"
+    assert "pip install rawpy" in msg, "no remedy given"
+    assert "JPEG" in msg, "the no-install way out is not offered"
+
+
+def test_raw_files_are_still_recognised_as_frames(tmp_path):
+    """The gate check in cli.py keys off find_shots, so a DNG has to be found as
+    a frame even when it cannot be read -- otherwise the shoot reports 'no
+    frames' and the real reason never surfaces."""
+    for name in ("low.dng", "mid.DNG", "high.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    shots = capture.find_shots(tmp_path)
+    assert set(shots) == {"low", "mid", "high"}
+    assert [p for p in shots.values() if p.suffix.lower() in capture.RAW_EXT], \
+        "no RAW frame detected, so cli.py would never print the rawpy message"
