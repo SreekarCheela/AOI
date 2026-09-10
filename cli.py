@@ -10,6 +10,7 @@
     python cli.py review                operator review screen for the last board
     python cli.py yield                 per-package false call rate and review time
     python cli.py shots --dir photos/   turn real photographs into a channel stack
+    python cli.py calibrate <image>     measure um/px from a dot-grid target
 
 Train on the workstation, run `export`, copy out/models to the Pi, then run
 with `--backend onnx`. Nothing else changes.
@@ -28,7 +29,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from aoi import board as B                     # noqa: E402
-from aoi import capture, config, fusion, models, pipeline, roi, rules, store, synth  # noqa: E402
+from aoi import calibrate, capture, config, fusion, models, pipeline, roi, rules, store, synth  # noqa: E402
 
 OUT = Path("out")
 MODELS = OUT / "models"
@@ -423,6 +424,41 @@ def cmd_bench(a: argparse.Namespace) -> None:
         print(f"  {name:6} {per * 500:.2f} s of model time per board (this Mac)")
 
 
+# ------------------------------------------------------------------- calibrate
+def cmd_calibrate(a: argparse.Namespace) -> None:
+    """Measure the sampling pitch from a photograph of a chrome-on-glass grid."""
+    if a.demo:
+        img = calibrate.render_target(dot_pitch_mm=a.pitch, um_per_px=a.demo)
+        print(f"synthetic target at {a.demo} um/px -- no photograph involved\n")
+    else:
+        img = cv2.imread(str(a.image), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            print(f"could not read {a.image}")
+            return
+        print(f"{a.image}  {img.shape[1]} x {img.shape[0]} px\n")
+
+    try:
+        cal = calibrate.measure_pitch(img, dot_pitch_mm=a.pitch)
+    except calibrate.CalibrationError as e:
+        print(f"NOT CALIBRATED\n\n  {e}\n")
+        print("Nothing has been changed. A pitch that is quietly wrong scales "
+              "every micron\nthis machine reports and cancels out of every "
+              "golden comparison, so it would\nnever be contradicted by "
+              "anything downstream.")
+        return
+
+    print(f"  {cal.report()}")
+    off = abs(cal.deviation)
+    if off > 0.02:
+        print(f"\n  {off:.1%} from the design intent. Every micron this machine "
+              f"reports is\n  currently that far out. Put {cal.um_per_px:.3f} "
+              f"into config.UM_PER_PX.")
+    else:
+        print(f"\n  Within 2% of design intent. Still worth recording "
+              f"{cal.um_per_px:.3f} rather\n  than leaving the nominal value "
+              f"in place -- it is the only measured one.")
+
+
 # ----------------------------------------------------------------------- shots
 def cmd_shots(a: argparse.Namespace) -> None:
     """Turn real photographs into a channel stack and show the banding."""
@@ -575,6 +611,12 @@ def main() -> None:
 
     y = sub.add_parser("yield"); y.set_defaults(fn=cmd_yield)
 
+    cb = sub.add_parser("calibrate"); cb.set_defaults(fn=cmd_calibrate)
+    cb.add_argument("image", nargs="?", help="photograph of the dot-grid target")
+    cb.add_argument("--pitch", type=float, default=1.0,
+                    help="target's CERTIFIED dot spacing in mm")
+    cb.add_argument("--demo", type=float, metavar="UM_PER_PX",
+                    help="run against a synthetic target at this pitch")
     sh = sub.add_parser("shots"); sh.set_defaults(fn=cmd_shots)
     sh.add_argument("--dir", default="photos", help="folder of low/mid/high[/diffuse] frames")
     sh.add_argument("--gamma", type=float, default=2.2, help="display gamma to undo (JPEG/PNG)")

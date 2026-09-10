@@ -154,6 +154,38 @@ class Package:
                       abs(b.cy - a.cy) / 2.0 - min(a.hy, b.hy))
             if gap <= 0.0:
                 bad.append(f"{self.name} has overlapping lands")
+
+        # A multi-lead package spreads its leads along its LONG side. This is
+        # the guard for the error that cost more time than any other here:
+        # SOIC-8 and SOT-23 both shipped with body length and width swapped,
+        # which puts the leads on the short sides. Nothing looks wrong -- the
+        # geometry is valid, the fillet runs are positive, every test passes --
+        # because the renderer and the inspector read the same numbers and
+        # agree with each other about a part that does not exist. Synthetic
+        # data cannot catch this; only a rule stated independently can.
+        if self.per_row > 1:
+            along_x = self.rows[0] in ("left", "right")
+            # leads on left/right rows spread across the body's WIDTH (y), so
+            # the width is the long side; on top/bottom rows, the length is
+            lead_axis = self.body_w if along_x else self.body_l
+            other = self.body_l if along_x else self.body_w
+            if lead_axis < other:
+                bad.append(
+                    f"{self.name} spreads {self.per_row} leads per row along its "
+                    f"{lead_axis:.2f} mm side while its other side is "
+                    f"{other:.2f} mm: a multi-lead package runs its leads along "
+                    f"the LONG axis, so body_l and body_w are probably swapped")
+
+        # Height feeds the lens perspective correction, so a missing or absurd
+        # one is no longer cosmetic -- it silently mis-corrects every placement
+        # measurement for that package.
+        if self.body_h <= 0.0:
+            bad.append(f"{self.name} has body_h {self.body_h}: height is read by "
+                       f"the lens perspective correction and must be positive")
+        elif self.body_h > 4.0 * max(self.body_l, self.body_w):
+            bad.append(f"{self.name} is {self.body_h:.2f} mm tall on a "
+                       f"{self.body_l:.2f} x {self.body_w:.2f} mm body, which is "
+                       f"implausible -- check the datasheet axis")
         return bad
 
     def footprint(self, margin: float = 0.35) -> tuple[float, float]:
@@ -202,6 +234,26 @@ LIBRARY: dict[str, Package] = {
                 rows=("left", "right", "top", "bottom"), per_row=8, pitch=0.80),
     )
 }
+
+
+def validate_library(library: dict[str, "Package"] | None = None) -> list[str]:
+    """Every geometry problem across the whole library, worst first."""
+    lib = LIBRARY if library is None else library
+    out: list[str] = []
+    for pkg in lib.values():
+        out.extend(pkg.validate())
+    return out
+
+
+# Checked once, at import, rather than left to a test somebody might not run.
+# A bad entry does not raise anywhere downstream -- it disables a test for that
+# package, or shifts its measurements, and surfaces weeks later as a false-call
+# rate on one package family. Failing here costs a second and names the problem.
+_PROBLEMS = validate_library()
+if _PROBLEMS:
+    raise ValueError(
+        "the package library has geometry that would silently break inspection:\n  "
+        + "\n  ".join(_PROBLEMS))
 
 
 def get(name: str) -> Package:

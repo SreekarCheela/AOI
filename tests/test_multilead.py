@@ -296,3 +296,49 @@ def test_the_mixed_board_actually_carries_leaded_parts():
     got = collections.Counter(c.package for c in B.mixed_board(1).components)
     for name in MULTI:
         assert got[name] > 0, f"mixed board has no {name}; it is not testing anything"
+
+
+# ------------------------------------------------- library guards, added later
+def test_the_whole_library_is_validated_at_import():
+    """`validate` existed and only a test ever called it, so a bad entry reached
+    the pipeline and surfaced weeks later as a false-call rate on one package.
+    It now runs at import, which is a second and names the problem."""
+    assert packages.validate_library() == []
+
+
+def test_a_swapped_length_and_width_is_caught():
+    """The error that cost more time than any other on this project. SOIC-8 and
+    SOT-23 both shipped with body_l and body_w swapped, putting the leads on the
+    short sides -- geometrically valid, fillet runs positive, every test green,
+    describing a part that does not exist.
+
+    Synthetic data cannot catch it: the renderer and the inspector read the same
+    numbers and agree with each other. Only a rule stated independently can, and
+    the rule is that a multi-lead package runs its leads along its LONG axis.
+    """
+    for name in ("SOIC-8", "SOT-23-6"):
+        good = packages.get(name)
+        swapped = packages.Package(
+            **{**good.__dict__, "body_l": good.body_w, "body_w": good.body_l})
+        problems = swapped.validate()
+        assert any("swapped" in m for m in problems), (
+            f"a swapped {name} was accepted: {problems}")
+
+
+def test_a_missing_or_absurd_height_is_caught():
+    """Height is no longer cosmetic -- the lens perspective correction reads it,
+    so a wrong one silently mis-corrects every placement for that package."""
+    good = packages.get("0603")
+    flat = packages.Package(**{**good.__dict__, "body_h": 0.0})
+    assert any("body_h" in m for m in flat.validate())
+
+    tower = packages.Package(**{**good.__dict__, "body_h": 20.0})
+    assert any("implausible" in m for m in tower.validate())
+
+
+def test_every_package_declares_a_usable_height():
+    """A guard on the shipped data, not on the code. Every family the library
+    carries has to have a height the correction can use."""
+    for name, pkg in packages.LIBRARY.items():
+        assert pkg.body_h > 0.0, f"{name} has no height"
+        assert pkg.body_h < 4.0 * max(pkg.body_l, pkg.body_w), f"{name} height implausible"

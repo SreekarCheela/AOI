@@ -41,6 +41,7 @@ enough to run on a Pi.
 | `cli.py review` | operator review screen for the last board |
 | `cli.py yield` | per-package false call rate and review time |
 | `cli.py shots --dir photos/` | turn real photographs into a channel stack — the physics gate |
+| `cli.py calibrate <image>` | measure µm/px from a dot-grid target instead of assuming it |
 
 `demo` takes `--backend none|torch|onnx`. The rule layer works with `none`, so
 the pipeline is useful before anything is trained.
@@ -153,7 +154,7 @@ full:
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest        # 320 passing, ~100 s
+.venv/bin/python -m pytest        # 375 passing, ~100 s
 ```
 
 Every design note above has tests behind it, named for what they pin rather
@@ -177,6 +178,8 @@ aoi/
   packages.py   package library (body/land geometry)
   board.py      Component/Board, centroid CSV import
   roi.py        CAD-derived regions; patch and region extraction
+  centroid.py   placement-file reader, tolerant of real export formats
+  calibrate.py  sampling pitch measured from a dot-grid target
   tiling.py     scan raster and which tile owns which component
   synth.py      four-channel renderer + defect injection
   capture.py    real photographs -> the same four-channel stack

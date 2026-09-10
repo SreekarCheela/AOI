@@ -12,7 +12,7 @@ import random
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from . import packages
+from . import centroid, packages
 
 
 @dataclass
@@ -46,8 +46,17 @@ class Board:
 
 # ---------------------------------------------------------------- centroid I/O
 def load_centroid(path: str | Path, board_width: float, board_height: float,
-                  y_up: bool = True, name: str = "board") -> Board:
-    """Read a centroid CSV with columns RefDes, Package, X, Y, Rotation.
+                  y_up: bool = True, name: str = "board",
+                  unit: str | None = None, side: str | None = "top") -> Board:
+    """Read a placement file into a Board.
+
+    Parsing lives in `aoi/centroid.py`, which handles the shapes real tools
+    actually emit -- different column names, units in the heading or in the
+    value, a title block above the header, whitespace or semicolon delimiters,
+    a decimal comma, and a side column spelled half a dozen ways. Use
+    `centroid.read` directly when you want the report of what was skipped;
+    this raises instead, because a Board with two thirds of its components is
+    not a partial success.
 
     Both board dimensions are required. Width used to be hard-coded to 0.0 with
     no way to supply it, which is not a cosmetic default: `synth.render` sizes
@@ -56,17 +65,21 @@ def load_centroid(path: str | Path, board_width: float, board_height: float,
     repository called this function, so no test caught it -- and this is the
     documented entry point for the first real assembly.
     """
+    rep = centroid.read(path, unit=unit, side=side)
+    if rep.missing:
+        raise ValueError(
+            f"{path}: no column found for {', '.join(rep.missing)}.\n"
+            f"Columns seen: {rep.columns or 'none recognised'}.\n"
+            f"Add the heading to aoi/centroid.ALIASES if the file is valid.")
+
     comps: list[Component] = []
-    with open(path, newline="") as fh:
-        for row in csv.DictReader(fh):
-            k = {key.strip().lower(): (val or "").strip() for key, val in row.items()}
-            y = float(k["y"])
-            rot = float(k.get("rotation", 0) or 0)
-            if y_up:                      # convert to y-down image convention
-                y = board_height - y
-                rot = -rot
-            comps.append(Component(k["refdes"], k["package"], float(k["x"]), y,
-                                   rot % 360.0, k.get("value", "")))
+    for pl in rep.placements:
+        y, rot = pl.y, pl.rot
+        if y_up:                          # convert to y-down image convention
+            y = board_height - y
+            rot = -rot
+        comps.append(Component(pl.refdes, pl.package, pl.x, y,
+                               rot % 360.0, pl.value))
     return Board(name, board_width, board_height, comps)
 
 
