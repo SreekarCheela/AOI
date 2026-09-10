@@ -83,11 +83,29 @@ def random_defects(brd: B.Board, n: int, rng: random.Random) -> dict[str, synth.
     return out
 
 
+PARALLAX_WARN_FRACTION = 0.25
+
+
 def _teach(brd: B.Board, n: int) -> rules.Golden:
     t = time.perf_counter()
     g = rules.fit_golden(golden_stacks(brd, n), brd)
     print(f"  taught {len(g.packages)} package families from {n} golden boards "
           f"({time.perf_counter() - t:.1f}s)")
+
+    # Say which packages the lens partly hides before anyone measures a joint on
+    # them. This is geometry, not a bug: a tall part off the optical axis has
+    # its own body image overhanging the joint at the near end, and no amount of
+    # software recovers solder the camera cannot see. Printing it here is the
+    # difference between a known constraint and a week spent wondering why one
+    # package family reads starved near the board edge.
+    bad = [row for row in rules.parallax_occlusion(brd, g.optical_axis_mm)
+           if row[3] > PARALLAX_WARN_FRACTION]
+    if bad:
+        print(f"  lens hides part of the joint on {len(bad)} package(s) at this "
+              f"board's extremes:")
+        for name, occ, run, frac in bad:
+            print(f"    {name:10} {occ * 1000:4.0f} um of a {run * 1000:4.0f} um "
+                  f"fillet run ({frac:.0%}) -- teach these on more golden boards")
     return g
 
 

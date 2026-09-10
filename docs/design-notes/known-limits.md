@@ -40,6 +40,25 @@
 - Synthetic data validates logic and wiring, not real-world false call rate.
   The 3–8 % starting FCR in the spec is a claim about production boards.
 
+- **The lens hides part of a tall part's joint, and no software recovers it.**
+  A component standing above the board is viewed off the optical axis, so its
+  own body image overhangs the joint at the near end. On a 72 mm board a TANT-A
+  loses 142 µm of a 200 µm fillet run at the extremes — 71% of the joint simply
+  not visible to the camera. This is geometry: it is why the spec chose a 75 mm
+  lens over a 35 mm one (194 µm of displacement down to 91 µm), and the residual
+  cannot be corrected away because the pixels do not exist.
+
+  Measured on a good TANT-A over three boards, the joint distance ran 1.6 / 3.0 /
+  2.4 with the lens modelled flat and 4.8 / 5.3 / 6.7 with it modelled properly,
+  against a fail threshold of 6.0. What it costs in practice is teach data:
+  worst-case distance over 30 boards fell from 10.5 at five golden boards to 5.6
+  at ten and 5.3 at twenty. `cli.py demo` now names the affected packages at
+  teach time rather than leaving it to be discovered as a false-call rate.
+
+  If it ever needs to be better than that, the levers are optical and not
+  algorithmic — a longer lens, a smaller board, or accepting that the tallest
+  packages are graded only near the axis.
+
 ---
 
 [← design notes index](README.md) · [repository README](../../README.md)

@@ -119,32 +119,67 @@ class GoldenPackage:
 @dataclass
 class Golden:
     packages: dict[str, GoldenPackage] = field(default_factory=dict)
+    # The optical axis these statistics were taught under. Carried on the model
+    # rather than passed at every call because teach and inspect MUST agree on
+    # it: the fillet windows and the body template are both built relative to
+    # where the lens puts a part, so correcting one side and not the other is
+    # worse than correcting neither. `measure` defaults to this.
+    optical_axis_mm: tuple[float, float] | None = None
 
     def has(self, name: str) -> bool:
         return name in self.packages
 
 
 # ------------------------------------------------------------------ geometry
-def joint_boxes(pkg: Package) -> list[tuple[np.ndarray, np.ndarray]]:
+def joint_boxes(pkg: Package,
+                parallax_mm: tuple[float, float] = (0.0, 0.0)
+                ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Per-land fillet window: outer land edge to body edge, where solder climbs.
 
     Built along each land's own axis, so a lead on the top row of a QFP gets a
     window running downward into the body exactly as a chip's left land gets one
     running right. For a two-terminal package this reproduces the original pair
     of boxes exactly.
+
+    `parallax_mm` shrinks the window to what the camera can actually SEE, and
+    only ever shrinks it. The two edges sit at different heights: the land is on
+    the board plane and images where CAD says, and so does the solder climbing
+    it, but the body stands above both and its image is displaced outward. Where
+    that displaced image falls across the joint it hides it, and the window has
+    to stop there.
+
+    It must not grow on the opposite end. The solder ends at the body's REAL
+    edge whatever the lens does with the body's image, so extending the window
+    outward past it only adds bare substrate -- measured, that made the reading
+    worse rather than better, because a window part-filled with board reads as a
+    starved joint and its variance across golden boards swamps the covariance.
+
+    The effect is large enough to matter and was invisible until the renderer
+    modelled it. A TANT-A is 1.6 mm tall with a fillet run of only 0.20 mm; at
+    15 mm off-axis its body image moves 73 um, which is 6.1 px of a 16.7 px
+    window. Measured on a good part over three boards, the joint distance went
+    1.6 / 3.0 / 2.4 without parallax to 4.8 / 5.3 / 6.7 with it, against a fail
+    threshold of 6.0 -- so an untreated tall part off-axis reads as insufficient
+    solder.
     """
+
+    def _visible(p_out: float, p_true: float, p_shift: float) -> float:
+        """Inner edge, clamped so the window can only ever shrink."""
+        p_app = p_true + p_shift
+        return p_true if abs(p_true - p_out) <= abs(p_app - p_out) else p_app
+
     out = []
     for l in pkg.lands():
         if abs(l.ax) > abs(l.ay):                      # land on a left/right row
             p_out = l.cx - l.ax * l.hx                 # outer edge, away from body
-            p_in = -l.ax * pkg.body_l / 2.0            # body edge
+            p_in = _visible(p_out, -l.ax * pkg.body_l / 2.0, parallax_mm[0])
             out.append((np.array([(p_out + p_in) / 2.0, l.cy]),
-                        np.array([abs(p_out - p_in) / 2.0, l.hy * 0.92])))
+                        np.array([max(abs(p_out - p_in) / 2.0, 1e-3), l.hy * 0.92])))
         else:                                          # top/bottom row
             p_out = l.cy - l.ay * l.hy
-            p_in = -l.ay * pkg.body_w / 2.0
+            p_in = _visible(p_out, -l.ay * pkg.body_w / 2.0, parallax_mm[1])
             out.append((np.array([l.cx, (p_out + p_in) / 2.0]),
-                        np.array([l.hx * 0.92, abs(p_out - p_in) / 2.0])))
+                        np.array([l.hx * 0.92, max(abs(p_out - p_in) / 2.0, 1e-3)])))
     return out
 
 
@@ -174,12 +209,13 @@ def _norm(a: np.ndarray, ref: np.ndarray | None = None) -> np.ndarray:
 
 
 def band_fractions(region: np.ndarray, pkg: Package,
-                   shift_px: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
+                   shift_px: tuple[float, float] = (0.0, 0.0),
+                   parallax_mm: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
     """Fraction of each fillet window lit in each angled ring -- the slope signature.
 
     Returns (n_lands, 3). One row per terminal, so a chip gives 2 and a QFP 32.
     """
-    boxes = joint_boxes(pkg)
+    boxes = joint_boxes(pkg, parallax_mm)
     out = np.zeros((len(boxes), 3), np.float32)
     for i, (centre, half) in enumerate(boxes):
         c = centre + np.array([shift_px[0], shift_px[1]]) * config.MM_PER_PX
@@ -505,9 +541,19 @@ def body_template(template: np.ndarray, pkg: Package) -> np.ndarray:
 
 
 # ------------------------------------------------------------------- measuring
-def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
+def measure(stack: np.ndarray, comp: Component, golden: Golden,
+            optical_axis_mm: tuple[float, float] | None = None) -> Measure:
+    """Every number for one component. `optical_axis_mm` enables the lens
+    perspective correction; pass the centre of the frame this part was imaged
+    in. Left None the placement reading carries the parallax error, which is
+    what it did before this existed."""
     pkg = comp.pkg
     m = Measure(comp.refdes, comp.package)
+    # Where the lens makes this part's body appear, in its own frame. Zero when
+    # no axis is supplied, which leaves every measurement exactly as it was.
+    axis = optical_axis_mm if optical_axis_mm is not None else golden.optical_axis_mm
+    par = ((0.0, 0.0) if axis is None else
+           config.parallax_local_mm(comp.x, comp.y, axis, pkg.body_h, comp.rot))
     region, _ = roi.extract_region(stack, comp, pkg)
     dif = config.CHANNELS.index("diffuse")
     reg_d = _norm(region[..., dif])
@@ -523,7 +569,7 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
         # measurement meaning "correlates with nothing" and every downstream
         # threshold reads it as a gross fault. An unknown that looks like a
         # defect is how one unprogrammed package flags a whole board.
-        m.bands = band_fractions(region, pkg)
+        m.bands = band_fractions(region, pkg, parallax_mm=par)
         m.ncc = m.dx_um = m.dy_um = m.dtheta_deg = float("nan")
         m.pol_margin = m.contrast_ratio = m.band_maha = float("nan")
         m.spill_worst = float("nan")
@@ -542,6 +588,17 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
     m.dx_um = dx_px * config.UM_PER_PX
     m.dy_um = dy_px * config.UM_PER_PX
 
+    # Lens perspective. The body sits above the board and the lens is not
+    # telecentric, so it images further from the optical axis than it really is
+    # -- up to 91 um for a 1 mm part at the corner of a tile, which lands
+    # directly in this measurement and is 60% of the placement tolerance. Part
+    # height is already in the package library, so the shift is predictable and
+    # subtracting it is what makes a telecentric lens unnecessary (spec section
+    # 2). Only this measurement needs it: the fillet, spill and gap windows all
+    # sit on the board plane at zero height.
+    m.dx_um -= par[0] * 1000.0
+    m.dy_um -= par[1] * 1000.0
+
     # skew: rotate the masked body template; the peak angle is the negative of
     # the part's own rotation, since turning the template the other way is what
     # brings it into register.
@@ -558,7 +615,7 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
         m.pol_margin = m.ncc - float(s180)
 
     # fillet windows follow the lands, which do not move with the body
-    m.bands = band_fractions(region, pkg)
+    m.bands = band_fractions(region, pkg, parallax_mm=par)
     m.band_maha = float(band_distance(m.bands, g).max())
 
     # Solder outside the land, over and above whatever a good joint of this
@@ -584,8 +641,65 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
 
 
 # ---------------------------------------------------------------------- teach
-def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
-    """Learn per-package templates and band statistics from known-good boards."""
+def _shift(img: np.ndarray, dx_px: float, dy_px: float) -> np.ndarray:
+    """Translate an image by a sub-pixel amount, replicating at the border."""
+    if abs(dx_px) < 1e-6 and abs(dy_px) < 1e-6:
+        return img
+    M = np.array([[1.0, 0.0, dx_px], [0.0, 1.0, dy_px]], np.float64)
+    return cv2.warpAffine(img, M, (img.shape[1], img.shape[0]),
+                          flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+
+def parallax_occlusion(board: Board, optical_axis_mm: tuple[float, float] | None = None
+                       ) -> list[tuple[str, float, float, float]]:
+    """Where the lens hides a joint behind its own part's body.
+
+    A part standing above the board is viewed off-axis, so its body image
+    overhangs the joint at the near end and hides part of it. That is geometry,
+    not a software problem: nothing downstream can measure solder the camera
+    cannot see. What software can do is say so before somebody spends a week
+    wondering why one package family reads starved near the board edge.
+
+    Returns (package, worst occlusion mm, fillet run mm, fraction) per package,
+    worst first, for the component of that package furthest from the axis.
+
+    Measured on a TANT-A -- 1.6 mm tall with a fillet run of only 0.20 mm -- the
+    joint distance on a GOOD part ran 1.6/3.0/2.4 with the lens modelled flat
+    and 4.8/5.3/6.7 with it modelled properly, against a fail threshold of 6.0.
+    The practical consequence is that tall packages away from the axis need more
+    golden boards than short ones to calibrate: worst-case distance over 30
+    boards fell from 10.5 at five golden boards to 5.6 at ten.
+    """
+    axis = (optical_axis_mm if optical_axis_mm is not None
+            else (board.width / 2.0, board.height / 2.0))
+    worst: dict[str, tuple[float, float]] = {}
+    for comp in board.components:
+        pkg = comp.pkg
+        if pkg.body_h <= 0.0:
+            continue
+        r = float(np.hypot(comp.x - axis[0], comp.y - axis[1]))
+        occ = config.parallax_shift_mm(r, pkg.body_h)
+        run = min(pkg.fillet_run(l) for l in pkg.lands())
+        if comp.package not in worst or occ > worst[comp.package][0]:
+            worst[comp.package] = (occ, run)
+    out = [(name, occ, run, occ / run if run > 0 else float("inf"))
+           for name, (occ, run) in worst.items()]
+    return sorted(out, key=lambda x: -x[3])
+
+
+def fit_golden(stacks: list[np.ndarray], board: Board,
+               optical_axis_mm: tuple[float, float] | None = None) -> Golden:
+    """Learn per-package templates and band statistics from known-good boards.
+
+    `optical_axis_mm` defaults to the centre of the board, which is the centre
+    of the frame while a whole board is imaged in one shot.
+    """
+    # `or` would swallow an explicit (0.0, 0.0) and, more importantly, gives a
+    # caller no way to say "no correction" -- it silently substituted the board
+    # centre for None, so a test that thought it had an uncorrected baseline did
+    # not have one.
+    axis = (optical_axis_mm if optical_axis_mm is not None
+            else (board.width / 2.0, board.height / 2.0))
     acc: dict[str, dict[str, list]] = {}
     for stack in stacks:
         for comp in board.components:
@@ -595,7 +709,20 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
                                               "spec_body": [],
                                               "df_body": [], "df_sub": [], "reg": []})
             dif = config.CHANNELS.index("diffuse")
-            d["tpl"].append(_norm(region[..., dif]))
+            # The body template is cut out of the average of these, and the
+            # average is taken across every component of the package -- which
+            # sit at different distances from the optical axis and therefore
+            # carry different parallax. Averaging them straight smears the body
+            # by the spread of that shift and biases the match peak toward the
+            # package mean, which no per-component correction downstream can
+            # undo. Shifting each contribution so its body lands at nominal
+            # makes the template sharp; the lands in it move instead, and
+            # nothing reads them -- only `body` and `body_180` are ever matched.
+            px, py = config.parallax_local_mm(comp.x, comp.y, axis,
+                                              pkg.body_h, comp.rot)
+            d["tpl"].append(_norm(_shift(region[..., dif],
+                                         -px / config.MM_PER_PX,
+                                         -py / config.MM_PER_PX)))
             d["reg"].append(region)
             # Levels the body segmentation thresholds are learned from. The body
             # is dark in the high channel where the lands are bright, and bright
@@ -613,12 +740,12 @@ def fit_golden(stacks: list[np.ndarray], board: Board) -> Golden:
             # The 5th percentile of the crop is bare substrate -- the footprint
             # margin guarantees some is always in view.
             d["df_sub"].append(float(np.percentile(dfc, 5)))
-            d["band"].append(band_fractions(region, pkg))
+            d["band"].append(band_fractions(region, pkg, parallax_mm=(px, py)))
             d["gap"].append(gap_specular(region, pkg))
             d["con"].append(body_contrast(region, pkg))
 
     packages_for = {c.package: c.pkg for c in board.components}
-    out = Golden()
+    out = Golden(optical_axis_mm=axis)
     for name, d in acc.items():
         shp = d["tpl"][0].shape
         tpl = np.mean([t for t in d["tpl"] if t.shape == shp], axis=0).astype(np.float32)

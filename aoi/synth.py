@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import cv2
+import math
+
 import numpy as np
 
 from . import config, packages
@@ -152,7 +154,18 @@ class _Patch:
 
 
 def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
-                      mm_per_px: float, place_sigma_um: float) -> _Patch:
+                      mm_per_px: float, place_sigma_um: float,
+                      parallax_mm: tuple[float, float] = (0.0, 0.0)) -> _Patch:
+    """One component, in its own local frame.
+
+    `parallax_mm` displaces the BODY only, in component-local mm. The lens is
+    not telecentric, so a part standing above the board is viewed at an angle
+    and images further from the optical axis than it really sits -- while its
+    lands, its fillets and the substrate are all at zero height and image
+    exactly where CAD says. Rendering the two together is what makes the
+    correction in `rules.measure` testable: without it here, correcting there
+    would be subtracting an error that was never introduced.
+    """
     p = _Patch(pkg, mm_per_px)
     X, Y = p.X, p.Y
     lands = pkg.lands()
@@ -186,7 +199,8 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
         pad_hx = pkg.pad_l / 2.0
         sgn = -1.0 if defect.pad == 0 else 1.0
         stand_x = sgn * d
-        p.paint(_rect(X, Y, stand_x, 0.0, pkg.body_w / 2.0, body_hy), BODY)
+        p.paint(_rect(X, Y, stand_x + parallax_mm[0], parallax_mm[1],
+                      pkg.body_w / 2.0, body_hy), BODY)
         x_toe = sgn * (d + pad_hx * 0.95)
         x_term = sgn * (d - pad_hx * 0.20)
         run = abs(x_term - x_toe)
@@ -201,8 +215,13 @@ def _render_component(pkg: Package, defect: Defect, rng: np.random.Generator,
     # --- de-rotated body coordinates for skew --------------------------------
     a = np.radians(oth)
     c, s = np.cos(a), np.sin(a)
-    Xb = (X - ox) * c + (Y - oy) * s
-    Yb = -(X - ox) * s + (Y - oy) * c
+    # `ox, oy` is where the part actually sits; `pmx, pmy` is how much further
+    # out the lens makes it look. Only these body coordinates get it -- the
+    # fillet terminations below use `ox, oy` alone, because solder is on the
+    # board plane and does not move.
+    pmx, pmy = parallax_mm
+    Xb = (X - ox - pmx) * c + (Y - oy - pmy) * s
+    Yb = -(X - ox - pmx) * s + (Y - oy - pmy) * c
 
     # --- fillets, one per land, each climbing along its own axis --------------
     for i, l in enumerate(lands):
@@ -294,6 +313,16 @@ def _to_channels(p: _Patch) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------- board
+def _parallax_local(gx: float, gy: float, axis: tuple[float, float],
+                    body_h: float, rot_deg: float) -> tuple[float, float]:
+    """Where the lens makes this body appear, in the patch's own frame.
+
+    Thin wrapper over the shared geometry so the renderer and the inspector
+    cannot drift apart on it.
+    """
+    return config.parallax_local_mm(gx, gy, axis, body_h, rot_deg)
+
+
 def render(board: Board, defects: dict[str, Defect] | None = None,
            opts: RenderOpts | None = None,
            mm_per_px: float = config.MM_PER_PX) -> np.ndarray:
@@ -323,13 +352,20 @@ def render(board: Board, defects: dict[str, Defect] | None = None,
         gx, gy = place(fx, fy)
         _blit_disc(stack, gx, gy, 0.5, mm_per_px)
 
+    # Optical axis, in image mm. The camera does not move with the board, so the
+    # radius that drives parallax is measured from the centre of the FRAME to
+    # where the part actually landed -- not from the board origin.
+    axis = (board.width / 2.0, board.height / 2.0)
+
     for comp in board.components:
         pkg = comp.pkg
-        patch = _render_component(pkg, defects.get(comp.refdes, Defect()), rng,
-                                  mm_per_px, opts.place_sigma_um)
-        chans = _to_channels(patch)
         gx, gy = place(comp.x, comp.y)
-        _blit(stack, chans, gx, gy, comp.rot + opts.board_rot_deg, mm_per_px)
+        phi = comp.rot + opts.board_rot_deg
+        _blit(stack, _to_channels(_render_component(
+            pkg, defects.get(comp.refdes, Defect()), rng, mm_per_px,
+            opts.place_sigma_um,
+            parallax_mm=_parallax_local(gx, gy, axis, pkg.body_h, phi))),
+            gx, gy, phi, mm_per_px)
 
     # illumination falloff, then sensor noise
     yy, xx = np.mgrid[0:H, 0:W]

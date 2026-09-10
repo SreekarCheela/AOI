@@ -46,14 +46,53 @@ def test_golden_records_the_good_part_ncc_distribution(golden):
             f"mean {g.ncc_mean:.3f}")
 
 
-def test_golden_ncc_differs_enough_between_packages_to_matter(golden):
-    """The justification for the whole change. If every package scored the same,
-    a global constant would have been fine."""
-    means = {n: g.ncc_mean for n, g in golden.packages.items()}
-    spread = max(means.values()) - min(means.values())
-    assert spread > 0.04, (
-        f"golden NCC spread across packages is only {spread:.3f} "
-        f"({means}); a package-relative threshold would be unnecessary")
+def test_the_absent_gate_separates_for_every_package(golden, brd):
+    """What this gate has to do, and nothing more.
+
+    It used to assert that the spread of golden NCC across packages exceeded
+    0.04, as a proxy for "a global constant would not serve every package".
+    Both halves of that have since stopped being true, and it is worth recording
+    why rather than quietly relaxing the number.
+
+    The proxy moved: correcting the parallax smear made every package match its
+    own template better, so the golden means closed up from a 0.07 spread to
+    0.033 while nothing about the gate changed.
+
+    And the claim itself no longer holds. It was the justification for retiring
+    a global `ncc < 0.62` FAIL gate, back when correlation had to separate
+    "absent" from "walked off its lands" -- a 0.572-to-0.612 window, far too
+    tight to hold, and genuinely impossible with one constant. Body localisation
+    took that job away: a displaced part still HAS a body, so it never reaches
+    here. All that is left is "is there a body at all", and measured across
+    every package that window is enormous -- a missing part scores up to 0.554
+    where the worst good part scores 0.924.
+
+    So a global constant WOULD work for what remains. Keeping the gate relative
+    costs nothing and stays correct if the window ever narrows again; what would
+    be wrong is leaving a test that claims a justification the code outgrew.
+    What the gate must still do, for every package, is separate.
+    """
+    good, absent = {}, {}
+    for comp in brd.components:
+        if golden.packages.get(comp.package) is None:
+            continue
+        clean = render_with(brd, {})
+        gone = render_with(brd, {comp.refdes: synth.Defect(kind="missing")})
+        good.setdefault(comp.package, []).append(rules.measure(clean, comp, golden).ncc)
+        absent.setdefault(comp.package, []).append(rules.measure(gone, comp, golden).ncc)
+
+    for pkg in sorted(good):
+        lo, hi = min(good[pkg]), max(absent[pkg])
+        gate = golden.packages[pkg].ncc_absent
+        assert hi < gate < lo, (
+            f"{pkg}: the absent gate {gate:.3f} does not sit between the best a "
+            f"missing part scored ({hi:.3f}) and the worst a good one scored "
+            f"({lo:.3f})")
+        assert (lo - gate) / lo > 0.10, (
+            f"{pkg}: only {(lo - gate) / lo:.1%} margin between the gate and a "
+            f"good part -- too tight to survive real boards")
+
+
 # ------------------------------- the original 0402 bug, kept as a history pin
 # (full coverage for every package now lives in test_body.py)
 @pytest.mark.parametrize("package", CHIPS)

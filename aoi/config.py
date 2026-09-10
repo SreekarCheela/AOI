@@ -1,10 +1,70 @@
 """Optical and inspection constants, carried straight from the design spec (docs/aoi-station-one.html)."""
 from __future__ import annotations
 
+import math
+
 # ---- optics (spec section 2) -------------------------------------------------
 UM_PER_PX: float = 12.0                 # sampling pitch at the board plane
 MM_PER_PX: float = UM_PER_PX / 1000.0
 TILE_PX: tuple[int, int] = (4096, 3000)  # IMX304 active area
+
+# Lens working distance, spec section 2: a 75 mm lens at 0.2875x. The number
+# matters because the lens is NOT telecentric, so it views a tall part from an
+# angle and the part appears displaced outward from the optical axis.
+WORKING_DISTANCE_MM: float = 336.0
+
+
+def parallax_shift_mm(radius_mm: float, height_mm: float,
+                      working_distance_mm: float = WORKING_DISTANCE_MM) -> float:
+    """How far outward a feature `height_mm` above the board appears to move.
+
+    Pinhole at height WD over the board plane. A feature at height h and
+    horizontal distance r from the optical axis lies on the ray that meets the
+    board plane at r * WD / (WD - h), so it images where a board-plane point
+    that much further out would:
+
+        shift = r * h / (WD - h)
+
+    Spec section 2 quotes 91 um for a 1 mm part at the corner of a tile, which is
+    r = 30.4 mm (the half-diagonal of a 49 x 36 mm tile): 30.4 * 1 / 335 = 0.091.
+    That is 7.6 px at 12 um, and it lands directly in the placement measurement.
+
+    The spec buys most of this away by choosing a 75 mm lens over a 35 mm one --
+    194 um down to 91 um -- and corrects the rest here, which is what makes a
+    telecentric lens and its ~$1,500 premium unnecessary.
+
+    Only the body moves. Lands, fillets and the substrate are at h = 0 and image
+    exactly where CAD says they are, which is why this correction is applied to
+    the placement measurement rather than to the crop as a whole.
+    """
+    denom = working_distance_mm - height_mm
+    if denom <= 0.0:
+        raise ValueError(
+            f"part height {height_mm} mm is not below the working distance "
+            f"{working_distance_mm} mm")
+    return radius_mm * height_mm / denom
+
+
+def parallax_local_mm(px: float, py: float, axis_mm: tuple[float, float],
+                      height_mm: float, rot_deg: float) -> tuple[float, float]:
+    """Parallax displacement of one part's body, in its own local mm frame.
+
+    Radially outward from the optical axis in image coordinates, then rotated
+    into the component frame -- which is the frame both the renderer's patch and
+    the inspector's de-rotated crop are built in, so the same function serves
+    both. Sharing it is deliberate: a sign convention that differs between the
+    two would show up as a correction of twice the error rather than none, and
+    that is exactly what the test for this asserts against.
+    """
+    dx, dy = px - axis_mm[0], py - axis_mm[1]
+    r = math.hypot(dx, dy)
+    if r < 1e-9 or height_mm <= 0.0:
+        return (0.0, 0.0)
+    shift = parallax_shift_mm(r, height_mm)
+    sx, sy = shift * dx / r, shift * dy / r
+    a = math.radians(rot_deg)
+    c, s = math.cos(a), math.sin(a)
+    return (sx * c + sy * s, -sx * s + sy * c)
 
 # ---- illumination (spec section 1) -------------------------------------------
 # A specular surface tilted alpha from horizontal reflects into a vertical

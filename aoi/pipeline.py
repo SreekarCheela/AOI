@@ -129,11 +129,17 @@ class Inspector:
         # misregistration the pipeline just corrected.
         res.aligned = stack
 
+        # The optical axis for the perspective correction. The prototype images a
+        # whole board in one frame, so that is the board centre; when the scan
+        # becomes a 20-tile raster this becomes the centre of the tile each
+        # component was imaged in, and nothing else here changes.
+        axis = (board.width / 2.0, board.height / 2.0)
+
         patches = np.stack([roi.extract_patch(stack, c, c.pkg) for c in board.components])
         anom = self.backend.anomaly(patches, [c.package for c in board.components])
 
         for i, comp in enumerate(board.components):
-            m = measure(stack, comp, self.golden)
+            m = measure(stack, comp, self.golden, optical_axis_mm=axis)
             m.anomaly = float(anom[i])
             res.measures.append(m)
 
