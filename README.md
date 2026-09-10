@@ -78,16 +78,23 @@ face that overshoots every band and inverts the test.
 |---|---|
 | placement offset | 192–253 µm measured for 250 µm injected, all packages |
 | skew | 0.6° mean absolute error (3° search grid) |
+| lens perspective | 48 µm error on a tall part off-axis, corrected to 0 µm |
 | board registration | 0.42 mm / 0.60° misregistration recovered to ~6 µm |
-| anomaly separation | ×29.6 mean across package families |
-| classifier | 100 % validation accuracy and recall |
+| anomaly separation | ×27.8 mean across package families |
+| classifier | 98.9 % validation accuracy, 100 % recall |
 | fusion tree | 100 % recall, 0 false calls of 112 good (0.00 %), anomaly column cross-fitted |
 | rule layer, false calls | 0 over 1000 component inspections — 6 boards × 4 lighting conditions, misregistered |
 | excess solder | good and starved ≤ 0.038 outside the land, balled 0.216–0.671; threshold 0.12 |
 | wrong part | good ×0.802–×1.013 of golden body area, substitutions ×0.19–×4.81; bounds ×0.72 / ×1.12 |
 | end to end | 12/12 defects caught, 0 missed, 0 false calls, all types correctly labelled |
-| torch ↔ onnx parity | max delta 2.4e-07, 100 % argmax agreement |
+| torch ↔ onnx parity | max delta 6.0e-07, 100 % argmax agreement |
 | throughput | 0.16 ms/component on ONNX → 0.07 s model time per 500-component board |
+
+Anomaly separation and classifier accuracy both moved slightly when the
+renderer began modelling lens perspective (×29.6 → ×27.8, 100 % → 98.9 %).
+That is the task getting harder rather than the models getting worse: a
+body's apparent position now depends on where it sits in the frame, which
+is true of the real machine and was not true of the renderer before.
 
 These are synthetic numbers. They prove the logic and the wiring are right; they
 say nothing about false call rate on real boards, which is what §8 of the spec
@@ -146,7 +153,7 @@ full:
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest        # 287 passing, ~80 s
+.venv/bin/python -m pytest        # 320 passing, ~100 s
 ```
 
 Every design note above has tests behind it, named for what they pin rather
@@ -170,6 +177,7 @@ aoi/
   packages.py   package library (body/land geometry)
   board.py      Component/Board, centroid CSV import
   roi.py        CAD-derived regions; patch and region extraction
+  tiling.py     scan raster and which tile owns which component
   synth.py      four-channel renderer + defect injection
   capture.py    real photographs -> the same four-channel stack
   rules.py      measurements + golden reference

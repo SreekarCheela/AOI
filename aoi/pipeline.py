@@ -129,10 +129,21 @@ class Inspector:
         # misregistration the pipeline just corrected.
         res.aligned = stack
 
-        # The optical axis for the perspective correction. The prototype images a
-        # whole board in one frame, so that is the board centre; when the scan
-        # becomes a 20-tile raster this becomes the centre of the tile each
-        # component was imaged in, and nothing else here changes.
+        # The optical axis for the perspective correction: the centre of the
+        # frame this part was imaged in. The prototype renders a whole board in
+        # ONE frame, so that is the board centre -- and it stays the board
+        # centre here on purpose. `aoi/tiling.py` already plans the real raster
+        # and decides which tile owns which component, but using it while the
+        # renderer still produces a single frame would hand `measure` the centre
+        # of a tile the image was never taken from. The swap belongs with the
+        # stage, not before it:
+        #
+        #     tiles = tiling.plan(board.width, board.height)
+        #     owner, orphans = tiling.assign(board, tiles)
+        #     axis = tiling.optical_axis_for(comp, board, tiles, owner)
+        #
+        # `test_tiling.py` pins that these two agree for a single-frame board,
+        # so turning the stage on cannot silently move every axis at once.
         axis = (board.width / 2.0, board.height / 2.0)
 
         patches = np.stack([roi.extract_patch(stack, c, c.pkg) for c in board.components])

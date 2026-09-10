@@ -1,12 +1,13 @@
-"""Five failures a code review found that the suite could not see.
+"""Failures the suite could not see, from a review and from an audit after it.
 
 Same character as the traps in `test_traps.py` -- nothing raised, nothing
 crashed, and the demo kept printing a plausible board report -- but these lived
 in paths the existing tests never entered: a verdict only reachable when the
 fusion tree disagrees with the rules, a window only reachable when it falls off
 the crop, a channel only reachable when a real frame is dark, an import nothing
-in the repository called, and a training split whose damage shows up as a number
-rather than as an error.
+in the repository called, a training split whose damage shows up as a number
+rather than as an error, and a search bound that was configured and never
+applied.
 
 Each test is named for the failure it prevents and states what the broken
 behaviour actually was, so a red one points at the reason rather than at the
@@ -205,3 +206,48 @@ def test_a_subspace_scores_its_own_training_patches_too_low():
         f"patches scored {seen.mean():.4f} by a model fitted on them and "
         f"{unseen.mean():.4f} by one that never saw them -- if these are equal, "
         f"in-sample scoring is no longer deflating and the cross-fit is moot")
+
+
+# ------------------------------------------------ 6 · the bounded placement search
+def test_the_placement_search_is_bounded_to_the_configured_window():
+    """`config.SEARCH_UM` held the spec's +-0.3 mm search window and nothing
+    applied it: the correlation peak was taken over the whole surface, so the
+    real bound was whatever the crop margin happened to be -- incidental, and
+    different for every package.
+
+    What the bound buys is refusing a peak that is nowhere near the part. A
+    bright neighbour or a stretch of bare copper can correlate better than a
+    body that has genuinely moved, and an unbounded search takes it and reports
+    a confident placement for the wrong object.
+    """
+    rng = np.random.RandomState(0)
+    region = (rng.rand(200, 300) * 20).astype(np.float32)
+    tpl = (rng.rand(20, 20) * 20).astype(np.float32)
+
+    # plant a perfect match far outside the window
+    far = int(config.SEARCH_UM / config.UM_PER_PX) * 3
+    cx = (region.shape[1] - tpl.shape[1]) // 2
+    cy = (region.shape[0] - tpl.shape[0]) // 2
+    region[cy:cy + 20, cx + far:cx + far + 20] = tpl
+
+    bound = config.SEARCH_UM / config.UM_PER_PX
+    _, dx, dy = rules._match(region, tpl, max_shift_px=bound)
+    assert abs(dx) <= bound + 1 and abs(dy) <= bound + 1, (
+        f"peak reported at ({dx:.0f}, {dy:.0f}) px, outside the "
+        f"{bound:.0f} px window it was given")
+
+    _, udx, _ = rules._match(region, tpl)          # unbounded finds the planted one
+    assert abs(udx) > bound, (
+        "the planted match is inside the window, so this test is not "
+        "demonstrating that the bound does anything")
+
+
+def test_the_search_window_is_wider_than_the_tolerance_it_tests():
+    """The same rule the rotation sweep follows. A search that stops at the
+    tolerance can only ever report the tolerance, so a part outside it reads as
+    exactly on the limit and never trips."""
+    assert config.SEARCH_UM >= 2 * config.MAX_OFFSET_UM, (
+        f"search window {config.SEARCH_UM} um against a "
+        f"{config.MAX_OFFSET_UM} um tolerance leaves no room to measure a part "
+        f"that is out of tolerance")
+    assert max(rules.ROT_SEARCH_DEG) >= 2 * config.MAX_SKEW_DEG
