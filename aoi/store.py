@@ -78,6 +78,21 @@ CREATE TABLE IF NOT EXISTS adjudication (
     seconds    REAL
 );
 
+-- Every call the false-call filter turned from FAIL into PASS, and what a
+-- hand audit later found. Section 6C allows the filter to suppress only above a
+-- high confidence threshold AND with a weekly audit of a random sample of what
+-- it suppressed, so the suppressions have to be durable and countable. A filter
+-- whose suppressions are not recorded cannot be audited, and one that is not
+-- audited is indistinguishable from one that is quietly creating escapes.
+CREATE TABLE IF NOT EXISTS suppression (
+    verdict_id  INTEGER PRIMARY KEY REFERENCES verdict(id) ON DELETE CASCADE,
+    reason      TEXT NOT NULL,
+    confidence  REAL NOT NULL,
+    created_at  TEXT NOT NULL,
+    audited_at  TEXT,
+    was_right   INTEGER          -- 1 the filter was right, 0 it hid a real defect
+);
+
 -- One representative good patch per package, so review can put the part it is
 -- asking about next to what correct looks like. An operator deciding from the
 -- crop alone is guessing.
@@ -343,6 +358,81 @@ class Store:
         labels = np.array([1 if r["call"] == "defect" else 0 for r in rows], np.int64)
         packages = np.array([r["package"] for r in rows])
         return patches, labels, packages
+
+    def export_training_set(self) -> tuple[np.ndarray, np.ndarray, np.ndarray,
+                                          np.ndarray]:
+        """Adjudicated fails as (features, labels, packages, verdict_ids).
+
+        The false-call filter fits on the rule MEASUREMENTS, not on the crop --
+        same reasoning section 6 gives for the verdict fusion: a tree over a
+        couple of dozen numbers trains on hundreds of samples where a network on
+        pixels needs thousands, and it can say afterwards which measurement it
+        leaned on.
+
+        Rows whose feature vector was never stored are dropped rather than
+        zero-filled. A zero vector is a real reading -- the one a grossly
+        defective part produces -- and filling with it would teach the filter
+        that a missing measurement means a real defect.
+        """
+        rows = self.db.execute(
+            "SELECT v.id, v.package, v.features, a.call FROM adjudication a"
+            " JOIN verdict v ON v.id = a.verdict_id"
+            " WHERE v.features IS NOT NULL ORDER BY a.verdict_id").fetchall()
+        if not rows:
+            # Imported here rather than at module scope: this file is the
+            # station's local record and deliberately depends on nothing in the
+            # inspection package, so it keeps working if that changes shape.
+            from .rules import FEATURE_NAMES
+            return (np.zeros((0, len(FEATURE_NAMES)), np.float32),
+                    np.zeros(0, np.int64), np.zeros(0, dtype="<U16"),
+                    np.zeros(0, np.int64))
+        feats = np.stack([np.frombuffer(r["features"], np.float32) for r in rows])
+        labels = np.array([1 if r["call"] == "defect" else 0 for r in rows], np.int64)
+        packages = np.array([r["package"] for r in rows])
+        ids = np.array([r["id"] for r in rows], np.int64)
+        return feats, labels, packages, ids
+
+    # ------------------------------------------------------- suppressions
+    def record_suppression(self, verdict_id: int, reason: str,
+                           confidence: float) -> None:
+        """Log one FAIL the filter turned into a PASS."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO suppression (verdict_id, reason, confidence,"
+            " created_at) VALUES (?,?,?,?)",
+            (int(verdict_id), reason, float(confidence), _now()))
+        self.db.commit()
+
+    def unaudited_suppressions(self, limit: int = 1000) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT s.*, v.refdes, v.package FROM suppression s"
+            " JOIN verdict v ON v.id = s.verdict_id"
+            " WHERE s.audited_at IS NULL ORDER BY s.created_at LIMIT ?",
+            (int(limit),)).fetchall()
+
+    def record_audit(self, verdict_id: int, was_right: bool) -> None:
+        """What a person found when they looked at a suppressed call by hand."""
+        self.db.execute(
+            "UPDATE suppression SET audited_at = ?, was_right = ?"
+            " WHERE verdict_id = ?",
+            (_now(), 1 if was_right else 0, int(verdict_id)))
+        self.db.commit()
+
+    def suppression_metrics(self) -> dict:
+        """How much the filter suppressed, and how often it was wrong to.
+
+        `escape_rate` is None until something has been audited, and stays None
+        rather than becoming 0.0. An unaudited filter has an UNKNOWN escape
+        rate; reporting zero for it is exactly the kind of invented number
+        section 8 warns about.
+        """
+        row = self.db.execute(
+            "SELECT COUNT(*) n, SUM(audited_at IS NOT NULL) a,"
+            " SUM(was_right = 0) wrong FROM suppression").fetchone()
+        n = int(row["n"] or 0)
+        audited = int(row["a"] or 0)
+        wrong = int(row["wrong"] or 0)
+        return {"suppressed": n, "audited": audited, "escapes_found": wrong,
+                "escape_rate": (wrong / audited) if audited else None}
 
     def yield_metrics(self) -> list[dict]:
         """Per-package numbers, which is how section 8 says to track this.

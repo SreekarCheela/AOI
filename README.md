@@ -42,6 +42,8 @@ enough to run on a Pi.
 | `cli.py yield` | per-package false call rate and review time |
 | `cli.py shots --dir photos/` | turn real photographs into a channel stack — the physics gate |
 | `cli.py calibrate <image>` | measure µm/px and lens distortion from a dot-grid target |
+| `cli.py filter` | fit the false-call filter (§6C); `--demo` simulates production |
+| `cli.py audit` | random sample of what the filter suppressed, for hand-checking |
 
 `demo` takes `--backend none|torch|onnx`. The rule layer works with `none`, so
 the pipeline is useful before anything is trained.
@@ -154,7 +156,7 @@ full:
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest        # 395 passing, ~105 s
+.venv/bin/python -m pytest        # 414 passing, ~120 s
 ```
 
 Every design note above has tests behind it, named for what they pin rather
@@ -179,7 +181,8 @@ aoi/
   board.py      Component/Board, centroid CSV import
   roi.py        CAD-derived regions; patch and region extraction
   centroid.py   placement-file reader, tolerant of real export formats
-  calibrate.py  sampling pitch measured from a dot-grid target
+  calibrate.py  sampling pitch and lens distortion, from a dot-grid target
+  falsecall.py  the false-call filter, its gate, and the audit sample
   tiling.py     scan raster and which tile owns which component
   synth.py      four-channel renderer + defect injection
   capture.py    real photographs -> the same four-channel stack

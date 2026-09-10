@@ -11,6 +11,8 @@
     python cli.py yield                 per-package false call rate and review time
     python cli.py shots --dir photos/   turn real photographs into a channel stack
     python cli.py calibrate <image>     measure um/px from a dot-grid target
+    python cli.py filter                fit the false-call filter (section 6C)
+    python cli.py audit                 sample what the filter suppressed
 
 Train on the workstation, run `export`, copy out/models to the Pi, then run
 with `--backend onnx`. Nothing else changes.
@@ -29,7 +31,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from aoi import board as B                     # noqa: E402
-from aoi import calibrate, capture, config, fusion, models, pipeline, roi, rules, store, synth  # noqa: E402
+from aoi import calibrate, capture, config, falsecall, fusion, models, pipeline, roi, rules, store, synth  # noqa: E402
 
 OUT = Path("out")
 MODELS = OUT / "models"
@@ -164,6 +166,24 @@ def cmd_demo(a: argparse.Namespace) -> None:
     for r in sorted(missed):
         print(f"?{r:7}{'':10}{defects[r].kind:14}{'MISSED':14}")
 
+    fc_report = None
+    if getattr(a, "filter", False):
+        fcp = MODELS / "falsecall.pkl"
+        if not fcp.exists():
+            print("\nno false-call filter trained yet -- run `cli.py filter`")
+        else:
+            fcm = falsecall.FalseCallFilter.load(fcp)
+            fc_report = fcm.apply(res.verdicts, res.measures)
+            print("\n" + fc_report.summary())
+            if fc_report.suppressed:
+                hidden = [s.refdes for s in fc_report.suppressed
+                          if s.refdes in defects]
+                print(f"  of those, {len(hidden)} were real defects"
+                      + (f": {', '.join(hidden)}  <-- ESCAPES" if hidden
+                         else " -- none, which is the only acceptable number"))
+                print("  every suppression is recorded; sample them with "
+                      "`cli.py audit`")
+
     if getattr(a, "save", False):
         with store.Store(DB) as st:
             # One reference patch per package, from the golden scans, so review
@@ -180,6 +200,14 @@ def cmd_demo(a: argparse.Namespace) -> None:
             patches = np.stack([roi.extract_patch(res.aligned, c, c.pkg)
                                 for c in brd.components])
             bid = st.save_result(brd, res, patches, serial=a.serial)
+            if fc_report is not None and fc_report.suppressed:
+                by_ref = {r["refdes"]: r["id"] for r in
+                          st.db.execute("SELECT id, refdes FROM verdict"
+                                        " WHERE board_id = ?", (bid,))}
+                for s in fc_report.suppressed:
+                    if s.refdes in by_ref:
+                        st.record_suppression(by_ref[s.refdes], s.reason,
+                                              s.confidence)
             n = len(st.review_queue(bid))
         print(f"\nsaved board {bid} to {DB}: {n} components queued for review")
         print(f"  review them with:  python cli.py review")
@@ -471,6 +499,144 @@ def cmd_calibrate(a: argparse.Namespace) -> None:
               f"in place -- it is the only measured one.")
 
 
+# ------------------------------------------------------------ false-call filter
+# The rule layer produces almost no false calls on synthetic boards, which is
+# the opposite of the 3-8% section 8 expects on real ones -- so a filter cannot
+# be trained from the renderer as it stands. Tightening the joint threshold puts
+# it in that regime: at 3.0 the false-call rate over defect-free boards is 4.63%.
+# That is a fair stand-in for production, and it is what --demo uses.
+DEMO_FILTER_FILLET_LIMIT = 3.0
+
+
+def _synth_adjudications(n_boards: int = 14, seed: int = 0):
+    """Feature vectors and labels the way production would deliver them.
+
+    Every row is a component the rule layer FAILED, labelled the way an operator
+    would: 1 if a defect was really injected there, 0 if the call was false.
+    """
+    rng = random.Random(seed)
+    brd = make_board(1)
+    golden = rules.fit_golden(golden_stacks(brd, 6), brd)
+    insp = pipeline.Inspector(golden, models.load_backend("none", None), None)
+
+    X, y, pk = [], [], []
+    orig = config.BAND_MAHALANOBIS_FAIL
+    config.BAND_MAHALANOBIS_FAIL = DEMO_FILTER_FILLET_LIMIT
+    try:
+        for b in range(n_boards):
+            defects = random_defects(brd, 6, rng) if b % 2 else {}
+            stack = synth.render(brd, defects=defects, opts=synth.RenderOpts(
+                seed=900 + b, vignette=rng.uniform(0.04, 0.13),
+                gain=rng.uniform(0.94, 1.05)))
+            res = insp.inspect(stack, brd)
+            byref = {m.refdes: m for m in res.measures}
+            for v in res.verdicts:
+                if not v.failed or v.reason in falsecall.NEVER_SUPPRESS:
+                    continue
+                m = byref.get(v.refdes)
+                if m is None:
+                    continue
+                X.append(m.vector())
+                y.append(1 if v.refdes in defects else 0)
+                pk.append(v.package)
+    finally:
+        config.BAND_MAHALANOBIS_FAIL = orig
+    return np.stack(X), np.array(y, np.int64), np.array(pk)
+
+
+def cmd_filter(a: argparse.Namespace) -> None:
+    """Fit the false-call filter, from the station log or from a simulation."""
+    if a.demo:
+        print(f"simulating production: joint threshold tightened to "
+              f"{DEMO_FILTER_FILLET_LIMIT} so the rule layer sits in the 3-8%\n"
+              f"false-call band section 8 expects on real boards. No operator "
+              f"was involved.\n")
+        X, y, pk = _synth_adjudications(a.boards)
+    else:
+        with store.Store(DB) as st:
+            X, y, pk, _ = st.export_training_set()
+        print(f"{len(X)} adjudicated component(s) in {DB}\n")
+
+    if len(X) == 0:
+        print("Nothing adjudicated yet. Run `cli.py demo --save` then "
+              "`cli.py review`,\nor `cli.py filter --demo` to exercise the "
+              "path without an operator.")
+        return
+
+    real, false = int((y == 1).sum()), int((y == 0).sum())
+    print(f"  {real} real defect(s), {false} false call(s)"
+          f"  ({100.0 * false / max(1, len(y)):.1f}% of what the rules flagged)")
+
+    fc = falsecall.FalseCallFilter(confidence=a.confidence)
+    try:
+        fc.fit(X, y)
+    except ValueError as e:
+        print(f"\nNOT FITTED\n\n  {e}")
+        return
+
+    print(f"\n  fitted on {fc.n_fit} samples, confidence gate {a.confidence:.2f}")
+
+    # Held out honestly: fit on the first 70%, score the rest. The floor applies
+    # to that fit too -- a diagnostic allowed to ignore it would report numbers
+    # from a model the gate would never accept.
+    cut = int(len(X) * 0.7)
+    try:
+        held = falsecall.FalseCallFilter(confidence=a.confidence).fit(X[:cut], y[:cut])
+    except ValueError as e:
+        print(f"  not enough to hold any out: {e}")
+        print(f"  Collect more before believing anything about how it "
+              f"generalises.")
+        held = None
+    if held is not None:
+        t_ = y[cut:]
+        would = held.p_false_call(X[cut:]) >= a.confidence
+        n_false = int((t_ == 0).sum())
+        caught = int((would & (t_ == 0)).sum())
+        escapes = int((would & (t_ == 1)).sum())
+        print(f"  held out {len(t_)}: would suppress {int(would.sum())} call(s)")
+        if n_false:
+            print(f"    false calls removed  {caught} of {n_false} "
+                  f"({100.0 * caught / n_false:.0f}%)")
+        print(f"    real defects hidden  {escapes}"
+              + ("   <-- ESCAPES. Raise the confidence gate." if escapes else
+                 "   <-- none, which is the only acceptable number here"))
+    top = fc.top_features(5)
+    if top:
+        print("  leans on: " + ", ".join(f"{k}={v:.3f}" for k, v in top))
+
+    MODELS.mkdir(parents=True, exist_ok=True)
+    fc.save(MODELS / "falsecall.pkl")
+    print(f"\nwrote {MODELS / 'falsecall.pkl'}")
+    print("It suppresses nothing until `demo` is run with --filter, and every\n"
+          "suppression it makes is recorded for `cli.py audit`.")
+
+
+def cmd_audit(a: argparse.Namespace) -> None:
+    """Draw a random sample of suppressed calls for somebody to check by hand."""
+    with store.Store(DB) as st:
+        m = st.suppression_metrics()
+        print(f"suppressed {m['suppressed']}, audited {m['audited']}, "
+              f"escapes found {m['escapes_found']}")
+        rate = m["escape_rate"]
+        print(f"escape rate among audited: "
+              + (f"{rate:.1%}" if rate is not None else
+                 "unknown -- nothing has been audited"))
+
+        pending = st.unaudited_suppressions()
+        if not pending:
+            print("\nNothing waiting to be audited.")
+            return
+        sample = [falsecall.Suppression(r["refdes"], r["package"], r["reason"],
+                                        r["confidence"]) for r in pending]
+        chosen = falsecall.audit_sample(sample, fraction=a.fraction, seed=a.seed)
+        print(f"\n{len(chosen)} of {len(pending)} pending, drawn at random -- "
+              f"check these against the boards:")
+        for s in chosen:
+            print(f"  {s.refdes:8} {s.package:10} {s.reason:12} "
+                  f"the filter was {s.confidence:.1%} sure this was a false call")
+        print("\nRecord findings with store.record_audit(verdict_id, was_right).")
+
+
 # ----------------------------------------------------------------------- shots
 def cmd_shots(a: argparse.Namespace) -> None:
     """Turn real photographs into a channel stack and show the banding."""
@@ -595,6 +761,8 @@ def main() -> None:
     d.add_argument("--seed", type=int, default=7)
     d.add_argument("--board-seed", type=int, default=1)
     d.add_argument("--backend", default="none", choices=["none", "torch", "onnx"])
+    d.add_argument("--filter", action="store_true",
+                   help="apply the trained false-call filter")
     d.add_argument("--save", action="store_true",
                    help="record the inspection in the local SQLite station log")
     d.add_argument("--serial", default=None, help="board serial from the scanner")
@@ -623,6 +791,15 @@ def main() -> None:
 
     y = sub.add_parser("yield"); y.set_defaults(fn=cmd_yield)
 
+    fc = sub.add_parser("filter"); fc.set_defaults(fn=cmd_filter)
+    fc.add_argument("--demo", action="store_true",
+                    help="simulate production adjudications")
+    fc.add_argument("--boards", type=int, default=48)
+    fc.add_argument("--confidence", type=float,
+                    default=falsecall.DEFAULT_CONFIDENCE)
+    au = sub.add_parser("audit"); au.set_defaults(fn=cmd_audit)
+    au.add_argument("--fraction", type=float, default=0.1)
+    au.add_argument("--seed", type=int, default=None)
     cb = sub.add_parser("calibrate"); cb.set_defaults(fn=cmd_calibrate)
     cb.add_argument("image", nargs="?", help="photograph of the dot-grid target")
     cb.add_argument("--pitch", type=float, default=1.0,
