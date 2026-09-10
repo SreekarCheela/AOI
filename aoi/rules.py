@@ -149,18 +149,28 @@ def joint_boxes(pkg: Package) -> list[tuple[np.ndarray, np.ndarray]]:
 
 
 # ------------------------------------------------------------- primitive tests
-def _norm(a: np.ndarray) -> np.ndarray:
+def _norm(a: np.ndarray, ref: np.ndarray | None = None) -> np.ndarray:
     """Scale to [0,1] if the input looks like 8-bit.
 
     Empty-safe: every caller clips a window against the crop bounds and can end
     up with nothing, and `max()` on an empty array raises. Guarding here rather
     than at each of the three call sites, all of which checked the size only
     after calling this.
+
+    `ref` supplies the array whose range decides the scale, and every caller
+    that normalises several arrays which must stay comparable has to pass it.
+    Deciding per-array is wrong exactly when it matters: an angled channel dark
+    enough never to exceed 1.5 -- which is what an underexposed high-angle frame
+    looks like, and the physics gate expects those frames to be nearly black --
+    escapes the divide its siblings receive and comes back 255x too bright. In
+    `specular_max` that put every pixel at 1.0, so no body was ever found and
+    the whole board reported as `missing`.
     """
     a = a.astype(np.float32)
     if a.size == 0:
         return a
-    return a / 255.0 if a.max() > 1.5 else a
+    r = a if ref is None else ref
+    return a / 255.0 if (r.size > 0 and r.max() > 1.5) else a
 
 
 def band_fractions(region: np.ndarray, pkg: Package,
@@ -260,7 +270,7 @@ def specular_max(region: np.ndarray) -> np.ndarray:
     copper lit only in the high band. A component body is not specular and stays
     dark in all three.
     """
-    chans = [_norm(region[..., config.CHANNELS.index(c)])
+    chans = [_norm(region[..., config.CHANNELS.index(c)], ref=region)
              for c in config.ANGLED_CHANNELS]
     return np.maximum(np.maximum(chans[0], chans[1]), chans[2])
 
@@ -374,7 +384,7 @@ def body_contrast(region: np.ndarray, pkg: Package) -> float:
     """Diffuse contrast between body window and its surround -- gross presence."""
     dif = config.CHANNELS.index("diffuse")
     ys, xs = roi.local_box_px(np.array([0.0, 0.0]), roi.body_rect(pkg), region.shape)
-    body = _norm(region[ys, xs, dif])
+    body = _norm(region[ys, xs, dif], ref=region[..., dif])
     whole = _norm(region[..., dif])
     if body.size == 0:
         return 0.0

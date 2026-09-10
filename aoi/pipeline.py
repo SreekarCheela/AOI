@@ -148,9 +148,26 @@ class Inspector:
                     # fusion layer unchanged.
                     res.verdicts.append(rv)
                     continue
-                res.verdicts.append(Verdict(m.refdes, m.package, bool(s >= self.fail_threshold),
-                                            float(s), rv.reason if rv.failed else "ok",
-                                            rv.detail))
+                # The tree owns the pass/fail call here, so the reason has to
+                # follow it. Taking `failed` from the tree and `reason` from the
+                # rules lets the two contradict each other in exactly the case
+                # the tree exists for -- when it disagrees with the rules. A
+                # component the tree flagged and the rules cleared was stored
+                # `failed=True, reason="ok"`, which the defect map then drew
+                # green and labelled `ok` while the review queue asked an
+                # operator to adjudicate it with no reason on screen.
+                failed = bool(s >= self.fail_threshold)
+                if not failed:
+                    reason, detail = "ok", ""
+                elif rv.failed:
+                    reason, detail = rv.reason, rv.detail
+                else:
+                    # No rule fired; the learned layer is the only thing objecting.
+                    reason = "anomaly"
+                    detail = (f"no rule fired -- flagged by the learned model "
+                              f"at {s:.2f} (threshold {self.fail_threshold:.2f})")
+                res.verdicts.append(
+                    Verdict(m.refdes, m.package, failed, float(s), reason, detail))
         else:
             res.verdicts = [rule_verdict(m, self.golden) for m in res.measures]
 
@@ -163,7 +180,11 @@ _COL = {"ok": (90, 190, 90), "untaught": (150, 150, 150),
         "missing": (60, 60, 235), "offset": (40, 170, 240),
         "skew": (40, 210, 240), "reversed": (200, 80, 220), "insufficient": (70, 70, 240),
         "bridge": (240, 120, 60), "tombstone": (90, 40, 200),
-        "excess": (150, 200, 60), "wrong_part": (220, 200, 80)}
+        "excess": (150, 200, 60), "wrong_part": (220, 200, 80),
+        # No rule fired and the learned layer objected anyway. It needs its own
+        # colour: `.get` falls back to the pass colour, so without an entry here
+        # a flagged component is drawn as though it passed.
+        "anomaly": (200, 160, 40)}
 
 
 def defect_map(stack: np.ndarray, board: Board, result: Result, path: str,

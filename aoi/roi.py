@@ -114,5 +114,15 @@ def local_box_px(centre_mm: np.ndarray, half_mm: np.ndarray, shape: tuple[int, i
     hx, hy = half_mm[0] / mm_per_px, half_mm[1] / mm_per_px
     x0, x1 = int(round(cx - hx)), int(round(cx + hx))
     y0, y1 = int(round(cy - hy)), int(round(cy + hy))
+
+    # A box can fall entirely outside the crop, and then the answer is nothing.
+    # Say so with an empty slice rather than by clamping only the start: a
+    # negative stop is legal Python and numpy reads it as an offset from the far
+    # end, so a window off the left edge came back as most of the crop instead
+    # of as nothing. Every caller guards with `win.size == 0`, and that guard
+    # could never fire -- the off-crop test measured the wrong pixels silently.
+    if x1 <= 0 or x0 >= w or y1 <= 0 or y0 >= h:
+        return slice(0, 0), slice(0, 0)
+
     return (slice(max(0, y0), min(h, max(y0 + 1, y1))),
             slice(max(0, x0), min(w, max(x0 + 1, x1))))

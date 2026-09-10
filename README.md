@@ -81,7 +81,7 @@ face that overshoots every band and inverts the test.
 | board registration | 0.42 mm / 0.60° misregistration recovered to ~6 µm |
 | anomaly separation | ×29.6 mean across package families |
 | classifier | 100 % validation accuracy and recall |
-| fusion tree | 100 % recall, 1 false call of 114 good (0.88 %) |
+| fusion tree | 100 % recall, 0 false calls of 112 good (0.00 %), anomaly column cross-fitted |
 | rule layer, false calls | 0 over 1000 component inspections — 6 boards × 4 lighting conditions, misregistered |
 | excess solder | good and starved ≤ 0.038 outside the land, balled 0.216–0.671; threshold 0.12 |
 | wrong part | good ×0.802–×1.013 of golden body area, substitutions ×0.19–×4.81; bounds ×0.72 / ×1.12 |
@@ -146,14 +146,16 @@ full:
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest        # 276 passing, ~80 s
+.venv/bin/python -m pytest        # 287 passing, ~80 s
 ```
 
 Every design note above has tests behind it, named for what they pin rather
 than for the module they exercise: `test_fillet.py` holds the illumination-drift
 measurements, `test_excess.py` pins the strip-inside-the-crop relationship,
 `test_traps.py` and `test_known_limits.py` assert the behaviours the two notes
-of the same name describe.
+of the same name describe, and `test_silent_failures.py` covers five failures a
+review found in paths the rest of the suite never entered — each verified to
+fail against the unfixed code before being kept.
 
 ## Layout
 

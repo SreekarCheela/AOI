@@ -45,9 +45,17 @@ class Board:
 
 
 # ---------------------------------------------------------------- centroid I/O
-def load_centroid(path: str | Path, board_height: float, y_up: bool = True,
-                  name: str = "board") -> Board:
-    """Read a centroid CSV with columns RefDes, Package, X, Y, Rotation."""
+def load_centroid(path: str | Path, board_width: float, board_height: float,
+                  y_up: bool = True, name: str = "board") -> Board:
+    """Read a centroid CSV with columns RefDes, Package, X, Y, Rotation.
+
+    Both board dimensions are required. Width used to be hard-coded to 0.0 with
+    no way to supply it, which is not a cosmetic default: `synth.render` sizes
+    the image from it and centres rotation on `width / 2`, so a board loaded
+    from a real centroid file rendered as a zero-width array. Nothing in the
+    repository called this function, so no test caught it -- and this is the
+    documented entry point for the first real assembly.
+    """
     comps: list[Component] = []
     with open(path, newline="") as fh:
         for row in csv.DictReader(fh):
@@ -59,7 +67,7 @@ def load_centroid(path: str | Path, board_height: float, y_up: bool = True,
                 rot = -rot
             comps.append(Component(k["refdes"], k["package"], float(k["x"]), y,
                                    rot % 360.0, k.get("value", "")))
-    return Board(name, 0.0, board_height, comps)
+    return Board(name, board_width, board_height, comps)
 
 
 def save_centroid(board: Board, path: str | Path) -> None:

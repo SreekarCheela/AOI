@@ -286,16 +286,54 @@ def cmd_train(a: argparse.Namespace) -> None:
     # vectors before any model exists, so that column is zeros on disk -- fit the
     # tree on it as-is and the anomaly score contributes nothing, which is
     # exactly what its importance reported.
-    be = models.TorchBackend(MODELS)
-    fpk = [str(x) for x in d["packages"][: len(X)]]
+    # The anomaly column has to be filled OUT OF SAMPLE for every row, by
+    # cross-fitting. Scoring a patch with a subspace fitted on that same patch
+    # deflates its distance, and the tree sitting on top then inherits whatever
+    # that mistake did to the column.
+    #
+    # Two wrong ways to do this, both of which were measured here first. Filling
+    # the whole column from models fitted on `tr` and then splitting the tree's
+    # data positionally leaks: held-out rows that were in the anomaly training
+    # set score against a model that has seen them, and the false-call rate came
+    # back 0.88%. Filling it the same way but splitting on `tr`/`va` removes the
+    # leak and creates a mismatch instead -- the tree learns a boundary on
+    # deflated training scores and applies it to honest held-out ones, which
+    # over-flags: 20.5%. Neither number describes the model.
+    #
+    # Cross-fitting gives every row a score from a model that never saw it, so
+    # both sides of the split are on the same footing. The shipped models are
+    # still the ones fitted on all of `tr` above -- this column exists only to
+    # fit and score the tree honestly.
+    K = 5
+    n_x = len(X)
+    fpk = np.array([str(x) for x in d["packages"][:n_x]])
     X = X.copy()
-    X[:, rules.FEATURE_NAMES.index("anomaly")] = be.anomaly(P[: len(X)], fpk)
-    print(f"fusion: anomaly column backfilled for {len(X)} feature rows")
+    acol = rules.FEATURE_NAMES.index("anomaly")
+    scores = np.zeros(n_x, np.float32)
+    rs = np.random.RandomState(0)
+    fold = rs.permutation(n_x) % K
+    for k in range(K):
+        te = np.where(fold == k)[0]
+        for pkg in sorted(set(fpk.tolist())):
+            te_p = te[fpk[te] == pkg]
+            if not len(te_p):
+                continue
+            good = [i for i in range(n_x)
+                    if fold[i] != k and fpk[i] == pkg and Y[i] == 0]
+            if len(good) < 20:      # too few to fit; leave at 0, as on disk
+                continue
+            mu, V = models.fit_subspace(P[good], a.pca_k)
+            net = models.build_subspace_anomaly(mu, V)
+            with torch.no_grad():
+                scores[te_p] = net(xt[te_p]).numpy().ravel()
+    X[:, acol] = scores
+    print(f"fusion: anomaly column cross-fitted ({K} folds) for {n_x} feature rows")
 
-    ntr = int(len(X) * 0.8)
-    fm = fusion.FusionModel().fit(X[:ntr], Y[:ntr])
-    p = fm.score(X[ntr:]) >= 0.5
-    t = Y[ntr:]
+    f_tr = np.array([i for i in tr.tolist() if i < n_x], dtype=np.int64)
+    f_va = np.array([i for i in va.tolist() if i < n_x], dtype=np.int64)
+    fm = fusion.FusionModel().fit(X[f_tr], Y[f_tr])
+    p = fm.score(X[f_va]) >= 0.5
+    t = Y[f_va]
     tp, fp = int((p & (t == 1)).sum()), int((p & (t == 0)).sum())
     fn = int((~p & (t == 1)).sum())
     print(f"fusion tree: recall {100.0 * tp / max(1, tp + fn):.1f}%  "
