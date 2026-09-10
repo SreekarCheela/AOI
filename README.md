@@ -172,29 +172,39 @@ fail against the unfixed code before being kept.
 ```
 docs/
   aoi-station-one.html   the design spec, Rev A — source of truth
-  physics-gate-shoot.md  checklist for the real-photograph gate
+  physics-gate-shoot.md  the one experiment still outstanding
   design-notes/          why the pipeline works the way it does
 
-aoi/
-  config.py     optics + channel constants from the spec
-  packages.py   package library (body/land geometry)
-  board.py      Component/Board, centroid CSV import
-  roi.py        CAD-derived regions; patch and region extraction
-  centroid.py   placement-file reader, tolerant of real export formats
-  calibrate.py  sampling pitch and lens distortion, from a dot-grid target
-  falsecall.py  the false-call filter, its gate, and the audit sample
-  tiling.py     scan raster and which tile owns which component
-  synth.py      four-channel renderer + defect injection
-  capture.py    real photographs -> the same four-channel stack
-  rules.py      measurements + golden reference
-  models.py     TinyCNN, subspace anomaly, Torch/ONNX backends
-  fusion.py     precedence rules + gradient-boosted fusion
-  pipeline.py   align, inspect, defect map
-  store.py      local SQLite station record
-  review.py     operator review screen
+aoi/                     what the machine is told
+  config.py       optics, channels, and every tuned threshold
+  packages.py     package library: body, land and height geometry
+  board.py        Component/Board, and the placement-file entry point
+  centroid.py     reading the placement files real tools write
+  calibrate.py    sampling pitch and lens distortion, from a glass target
+  tiling.py       the scan raster, and which position sees which part
 
-cli.py          demo / dataset / train / export / bench / review / yield / shots
-tests/          276 tests; see Tests above
-examples/       output from `cli.py demo`, no hardware involved
-out/            generated — models, datasets, defect maps (gitignored)
+                         what it sees
+  synth.py        four-channel renderer + defect injection
+  capture.py      real photographs -> the same four-channel stack
+  roi.py          CAD-derived regions; patch and region extraction
+
+                         what it decides
+  rules.py        measurements — numbers, never verdicts
+  models.py       classifier, anomaly subspace, Torch/ONNX backends
+  fusion.py       precedence rules + gradient-boosted fusion
+  pipeline.py     align, inspect, defect map
+  falsecall.py    the false-call filter, and the gate that bounds it
+
+                         where it lands
+  store.py        the local station record, one SQLite file
+  review.py       the operator screen
+
+cli.py            demo / dataset / train / export / bench / review / yield
+                  / shots / calibrate / filter / audit
+tests/            414 tests; see Tests above
+examples/         output from `cli.py demo`, no hardware involved
+out/              generated — models, datasets, defect maps (gitignored)
 ```
+
+`aoi/__init__.py` carries the same map, so it is there when you are reading the
+code rather than the README.
