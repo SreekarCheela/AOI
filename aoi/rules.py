@@ -329,8 +329,28 @@ def _band_cov_inv(samples: np.ndarray) -> np.ndarray:
     are correlated at r = 0.5 to 0.85 on good joints. That leaves one
     near-collapsed axis, and a plain inverse turns its small eigenvalue into an
     enormous distance for a tiny deviation -- so the test meant to cut false
-    calls would generate them instead. Shrinking the off-diagonals bounds the
-    condition number while keeping the correlation that makes the test work.
+    calls would generate them instead.
+
+    TWO things regularise here and they do different jobs, which was worth
+    measuring rather than assuming. Over 400 draws at n=5, r=0.85, scoring a
+    good joint dimmed 8% -- the common-mode move the test exists to forgive --
+    against a fail threshold of 6.0:
+
+        ridge   floor    p99    worst
+        0.15    0.01     2.61    3.32     shipped
+        0.00    0.01     2.77    3.32     floor alone: almost the whole effect
+        0.15    1e-7     3.63   13.12     ridge alone: still generates false calls
+        0.00    1e-7    12.72   26.17     neither
+
+    So BAND_COV_FLOOR is what keeps the distance bounded, and this docstring
+    used to credit the ridge for it. The ridge earns its place separately, by
+    bounding the condition number -- at n=5 that is four figures without it and
+    under 20 with it -- which is what keeps the weak axis from dominating the
+    direction of the distance even when its magnitude is already capped.
+
+    Both are pinned in tests/test_fillet.py. Re-derive them against real golden
+    boards: synthetic joints are tidier than real ones and the good-side tail
+    will be fatter.
     """
     n = int(samples.shape[0])
     floor = config.BAND_COV_FLOOR ** 2
@@ -391,15 +411,40 @@ def body_contrast(region: np.ndarray, pkg: Package) -> float:
     return float(body.mean() - whole.mean())
 
 
-def _match(region_ch: np.ndarray, template: np.ndarray) -> tuple[float, float, float]:
-    """NCC of template inside region; returns (score, dx_px, dy_px)."""
+def _match(region_ch: np.ndarray, template: np.ndarray,
+           max_shift_px: float | None = None) -> tuple[float, float, float]:
+    """NCC of template inside region; returns (score, dx_px, dy_px).
+
+    `max_shift_px` bounds how far from nominal the peak is allowed to be. The
+    spec calls for a +-0.3 mm search window and `config.SEARCH_UM` recorded it,
+    but nothing ever applied it: the peak was taken over the whole correlation
+    surface, so the real bound was whatever the crop margin happened to be --
+    incidental, and different for every package.
+
+    Bounding it is the same principle the rotation sweep already follows. The
+    window has to be wider than the tolerance it tests, or a part outside
+    tolerance can only ever measure exactly the tolerance; 300 um against a
+    150 um limit is that factor of two. Its value is refusing a peak that is
+    nowhere near the part: a bright neighbour or a stretch of bare copper can
+    correlate better than a body that has genuinely moved, and an unbounded
+    search will take it and report a confident placement for the wrong object.
+    """
     if template.size == 0 or region_ch.shape[0] < template.shape[0] or \
        region_ch.shape[1] < template.shape[1]:
         return 0.0, 0.0, 0.0
     res = cv2.matchTemplate(region_ch, template, cv2.TM_CCOEFF_NORMED)
-    _, score, _, loc = cv2.minMaxLoc(res)
     cx = (region_ch.shape[1] - template.shape[1]) / 2.0
     cy = (region_ch.shape[0] - template.shape[0]) / 2.0
+
+    if max_shift_px is not None:
+        r = int(round(max_shift_px))
+        x0, x1 = max(0, int(round(cx)) - r), min(res.shape[1], int(round(cx)) + r + 1)
+        y0, y1 = max(0, int(round(cy)) - r), min(res.shape[0], int(round(cy)) + r + 1)
+        if x1 > x0 and y1 > y0:
+            _, score, _, loc = cv2.minMaxLoc(res[y0:y1, x0:x1])
+            return float(score), float(loc[0] + x0 - cx), float(loc[1] + y0 - cy)
+
+    _, score, _, loc = cv2.minMaxLoc(res)
     return float(score), float(loc[0] - cx), float(loc[1] - cy)
 
 
@@ -492,7 +537,8 @@ def measure(stack: np.ndarray, comp: Component, golden: Golden) -> Measure:
                              / max(g.contrast_std, 0.01))
 
     # placement: match the body against the un-rotated region
-    m.ncc, dx_px, dy_px = _match(reg_d, g.body)
+    m.ncc, dx_px, dy_px = _match(reg_d, g.body,
+                                 max_shift_px=config.SEARCH_UM / config.UM_PER_PX)
     m.dx_um = dx_px * config.UM_PER_PX
     m.dy_um = dy_px * config.UM_PER_PX
 

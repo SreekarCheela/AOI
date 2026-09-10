@@ -61,11 +61,20 @@ CREATE TABLE IF NOT EXISTS verdict (
 );
 CREATE INDEX IF NOT EXISTS verdict_board ON verdict(board_id);
 
+-- `seq` is the order the operator actually decided in, and it exists because
+-- nothing else recovers that. `decided_at` is second-precision, so a board
+-- reviewed at a few seconds per component produces ties, and ordering by it
+-- falls back to verdict_id -- which is board component order, while the queue
+-- serves the operator in refdes order. `review_timing` turns position into a
+-- factual claim shown to the operator ("orientation, it was the first
+-- component" against "an interruption at component N"), so a position derived
+-- from the wrong order is a confident wrong answer rather than a missing one.
 CREATE TABLE IF NOT EXISTS adjudication (
     verdict_id INTEGER PRIMARY KEY REFERENCES verdict(id) ON DELETE CASCADE,
     call       TEXT NOT NULL CHECK (call IN ('defect', 'false_call')),
     operator   TEXT,
     decided_at TEXT NOT NULL,
+    seq        INTEGER,
     seconds    REAL
 );
 
@@ -164,8 +173,38 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
-        self.db.commit()
+        self._migrate()
 
+    def _migrate(self) -> None:
+        """Bring an existing station file up to the current schema.
+
+        `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+        exists, so a column added to SCHEMA never reaches a database written by
+        an earlier version -- and this file is the station's permanent record,
+        so there will always be one. Every step here has to be safe to run on
+        every open.
+        """
+        cols = {r["name"] for r in
+                self.db.execute("PRAGMA table_info(adjudication)").fetchall()}
+        if "seq" not in cols:
+            self.db.execute("ALTER TABLE adjudication ADD COLUMN seq INTEGER")
+            # Backfill from the best order the old rows can offer. It is the
+            # order the new column exists to replace, so these numbers are no
+            # better than what they came from -- but they are stable, and every
+            # adjudication recorded from now on carries a real one.
+            for (bid,) in self.db.execute(
+                    "SELECT DISTINCT v.board_id FROM adjudication a"
+                    " JOIN verdict v ON v.id = a.verdict_id").fetchall():
+                rows = self.db.execute(
+                    "SELECT a.verdict_id FROM adjudication a"
+                    " JOIN verdict v ON v.id = a.verdict_id"
+                    " WHERE v.board_id = ? ORDER BY a.decided_at, a.verdict_id",
+                    (bid,)).fetchall()
+                for i, r in enumerate(rows, start=1):
+                    self.db.execute(
+                        "UPDATE adjudication SET seq = ? WHERE verdict_id = ?",
+                        (i, r["verdict_id"]))
+            self.db.commit()
     def close(self) -> None:
         self.db.close()
 
@@ -223,10 +262,23 @@ class Store:
         """Record an operator's decision. This is the labelled sample."""
         if call not in ("defect", "false_call"):
             raise ValueError(f"call must be 'defect' or 'false_call', got {call!r}")
+        # Next in sequence for the board this verdict belongs to. Scoped per
+        # board so a position means "Nth on this board", which is what the
+        # timing note claims. Re-adjudicating a component keeps its original
+        # place rather than jumping to the end.
+        row = self.db.execute(
+            "SELECT COALESCE(MAX(a.seq), 0) + 1 AS nxt FROM adjudication a"
+            " JOIN verdict v ON v.id = a.verdict_id"
+            " WHERE v.board_id = (SELECT board_id FROM verdict WHERE id = ?)",
+            (int(verdict_id),)).fetchone()
+        existing = self.db.execute(
+            "SELECT seq FROM adjudication WHERE verdict_id = ?",
+            (int(verdict_id),)).fetchone()
+        seq = existing["seq"] if existing and existing["seq"] is not None else row["nxt"]
         self.db.execute(
             "INSERT OR REPLACE INTO adjudication (verdict_id, call, operator,"
-            " decided_at, seconds) VALUES (?,?,?,?,?)",
-            (int(verdict_id), call, operator, _now(),
+            " decided_at, seq, seconds) VALUES (?,?,?,?,?,?)",
+            (int(verdict_id), call, operator, _now(), int(seq),
              None if seconds is None else float(seconds)))
         self.db.commit()
 
@@ -234,6 +286,18 @@ class Store:
     def latest_board(self) -> sqlite3.Row | None:
         return self.db.execute(
             "SELECT * FROM board ORDER BY id DESC LIMIT 1").fetchone()
+
+    def board(self, board_id: int) -> sqlite3.Row | None:
+        """One board by id, or None if there is no such board.
+
+        `cli.py review --board N` used to take its id from N and its NAME from
+        whatever board happened to be latest, so the two could describe different
+        boards; and an id that did not exist produced an empty queue and the
+        message "every fail on this board is already adjudicated" for a board
+        that was never inspected.
+        """
+        return self.db.execute(
+            "SELECT * FROM board WHERE id = ?", (board_id,)).fetchone()
 
     def review_queue(self, board_id: int) -> list[sqlite3.Row]:
         """Components a person still has to decide on.
@@ -354,7 +418,7 @@ class Store:
         rows = self.db.execute(
             "SELECT a.seconds FROM adjudication a JOIN verdict v ON v.id = a.verdict_id"
             " WHERE v.board_id = ? AND a.seconds IS NOT NULL"
-            " ORDER BY a.decided_at, a.verdict_id", (board_id,)).fetchall()
+            " ORDER BY a.seq, a.decided_at, a.verdict_id", (board_id,)).fetchall()
         secs = [float(r["seconds"]) for r in rows]
         if not secs:
             return ReviewTiming(board_id, 0, 0.0, 0.0, 0.0, 0.0, 0, 0)

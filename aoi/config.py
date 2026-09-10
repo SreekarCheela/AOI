@@ -95,12 +95,27 @@ BAND_MAHALANOBIS_FAIL: float = 6.0
 # correlated at 0.8 leave one near-collapsed axis whose small eigenvalue a plain
 # inverse turns into an enormous distance. Unregularised, the test meant to cut
 # false calls becomes a source of them.
+# Two different jobs, measured in rules._band_cov_inv's docstring rather than
+# assumed. FLOOR is what stops a near-collapsed axis producing an enormous
+# distance -- remove it and a good joint under an 8% dim scores 13 against a
+# threshold of 6. RIDGE bounds the condition number, which keeps the weak axis
+# from dominating the DIRECTION of the distance.
 BAND_COV_RIDGE: float = 0.15    # shrink off-diagonals toward a diagonal matrix
 BAND_COV_FLOOR: float = 0.01    # absolute floor on per-band std, as for band_std
 
+# Every value a verdict's `reason` may take. Not decoration: `pipeline._COL`
+# looks the reason up to colour the defect map and falls back to the PASS colour
+# on a miss, so a reason missing from that table is a flagged component drawn as
+# though it passed. Listing them here lets one test hold the two in step --
+# which is how `anomaly` was found missing when the fusion layer started
+# emitting it.
+#
+# `untaught` and `anomaly` are not defects. The first is a coverage gap in the
+# program and the second is the learned layer objecting where no rule fired, and
+# both still need a colour and a name.
 DEFECT_CLASSES: tuple[str, ...] = (
     "ok", "missing", "offset", "skew", "reversed", "insufficient", "bridge", "tombstone",
-    "excess", "wrong_part",
+    "excess", "wrong_part", "untaught", "anomaly",
 )
 
 # ---- excess solder -----------------------------------------------------------

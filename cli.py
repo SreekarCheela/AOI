@@ -237,6 +237,7 @@ def cmd_train(a: argparse.Namespace) -> None:
     # --- anomaly: per-package subspace, fitted from good patches only --------
     PK = d["packages"]
     tr_set, va_set = set(tr.tolist()), set(va.tolist())
+    models.check_name_collisions(sorted(set(str(x) for x in PK.tolist())))
     print(f"anomaly subspace (rank {a.pca_k}), per package family")
     seps = []
     for pkg in sorted(set(PK.tolist())):
@@ -463,11 +464,18 @@ def cmd_review(a: argparse.Namespace) -> None:
     """Open the operator review screen on the most recent board."""
     from aoi import review
     with store.Store(DB) as st:
-        board = st.latest_board()
-        if board is None:
-            print(f"No inspections in {DB}. Run:  python cli.py demo --save")
-            return
-        bid = a.board or board["id"]
+        if a.board:
+            board = st.board(a.board)
+            if board is None:
+                print(f"No board {a.board} in {DB}. "
+                      f"Run `python cli.py yield` to see what is recorded.")
+                return
+        else:
+            board = st.latest_board()
+            if board is None:
+                print(f"No inspections in {DB}. Run:  python cli.py demo --save")
+                return
+        bid = board["id"]
         queue = st.review_queue(bid)
         gaps = st.untestable(bid)
         print(f"board {bid} ({board['name']}): {len(queue)} to review, "

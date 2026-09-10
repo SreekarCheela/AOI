@@ -16,8 +16,22 @@ inspect ──▶ SQLite ──▶ review screen ──▶ adjudication ──�
 everything that failed or could not be tested — not for all 500 good components,
 which would be storing the same picture of a correct 0402 several hundred times
 a board. `export_labels()` hands back `(patches, labels, packages)` with 1 = real
-defect and 0 = false call: naturally balanced, because it only ever contains
-components the rule layer already flagged.
+defect and 0 = false call.
+
+It only ever contains components the rule layer already flagged, which is what
+keeps the two classes within reach of each other — a dataset drawn from whole
+boards would be one defect in several thousand parts. **"Balanced" is a claim
+about production, not about what is in the file today.** On synthetic boards the
+split runs about 11:1 toward real defects, because faults are injected
+deliberately and the rule layer throws almost no false calls. On real boards it
+inverts: at the 3–8 % starting false-call rate in §8 of the spec against roughly
+one real defect every ten boards, the queue is overwhelmingly false calls, and
+the ratio keeps moving as the machine improves.
+
+So treat the ratio as something to measure per package and per week rather than
+something the design guarantees. If one class thins out far enough to matter,
+that is a fact about the machine's current false-call rate and worth knowing on
+its own — not a reason to go looking for more data elsewhere.
 
 `aoi/review.py` is the screen. Native desktop, Tk from the standard library, so
 the Pi image stays small. The design follows from the §10 exit criterion — an

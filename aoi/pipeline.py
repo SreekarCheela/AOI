@@ -186,6 +186,13 @@ _COL = {"ok": (90, 190, 90), "untaught": (150, 150, 150),
         # a flagged component is drawn as though it passed.
         "anomaly": (200, 160, 40)}
 
+# The colour table and the list of reasons have to stay in step; see
+# config.DEFECT_CLASSES for why a missing entry is silent rather than loud.
+assert set(_COL) == set(config.DEFECT_CLASSES), (
+    f"defect-map colours and config.DEFECT_CLASSES disagree: "
+    f"missing colour {sorted(set(config.DEFECT_CLASSES) - set(_COL))}, "
+    f"unknown reason {sorted(set(_COL) - set(config.DEFECT_CLASSES))}")
+
 
 def defect_map(stack: np.ndarray, board: Board, result: Result, path: str,
                scale: float = 0.55) -> None:

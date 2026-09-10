@@ -164,3 +164,187 @@ def test_a_heavy_fillet_is_not_reported_as_insufficient(brd, golden):
     assert verdict.reason != "insufficient", (
         f"a joint at 160% of golden in every band was reported as insufficient "
         f"solder (d={d.max():.2f})")
+
+
+# ------------------------------------------------- covariance regularisation
+# The docstring on `_band_cov_inv` calls the regularisation "load-bearing, not
+# hygiene", and until now nothing held it to that. These pin the two properties
+# the claim rests on: without shrinkage a near-collapsed axis blows the distance
+# up, and with it the axis stays usable while the correlation that makes the
+# test work is preserved.
+def _golden_like(samples):
+    """A GoldenPackage carrying one pad's band statistics."""
+    g = object.__new__(rules.GoldenPackage)
+    g.band_mean = samples.mean(axis=0)[None, :]
+    g.band_std = np.maximum(samples.std(axis=0), config.BAND_COV_FLOOR)[None, :]
+    g.band_cov_inv = rules._band_cov_inv(samples)[None, :, :]
+    return g
+
+
+BAND_MEAN = np.array([0.42, 0.33, 0.27])
+
+
+def _teachlike_samples(n=8, r=0.85, sd=0.04, seed=0):
+    """Band fractions the way teach sees them: few samples, strongly correlated.
+
+    Drawn from an explicit correlation structure rather than built up from a
+    shared factor, so `r` is the correlation these samples actually have.
+    README records r = 0.5 to 0.85 across the five package families measured on
+    good joints; 0.85 is the tightest of those and therefore the case the
+    regularisation has to survive.
+    """
+    corr = np.full((3, 3), r)
+    np.fill_diagonal(corr, 1.0)
+    cov = corr * sd ** 2
+    rng = np.random.RandomState(seed)
+    return np.clip(rng.multivariate_normal(BAND_MEAN, cov, size=n), 0.0, 1.0)
+
+
+def _dim_distance(samples, inv, frac=0.92):
+    """Mahalanobis distance of a uniformly dimmed good joint from its own mean.
+
+    The common-mode move: vignetting, LED ageing, a different board finish.
+    It has to stay cheap, and that is the whole reason the bands are scored
+    jointly rather than one at a time.
+    """
+    d = samples.mean(axis=0) * frac - samples.mean(axis=0)
+    return float(np.sqrt(max(d @ inv @ d, 0.0)))
+
+
+def _plain_inv(samples):
+    cov = np.cov(samples.astype(np.float64), rowvar=False)
+    return np.linalg.inv(cov + 1e-12 * np.eye(3))
+
+
+def test_an_unregularised_covariance_manufactures_the_false_calls_it_removes():
+    """The failure the ridge exists to prevent, measured rather than asserted.
+
+    Section 10 allows teach on as few as 5 golden boards. At that size a 3x3
+    covariance over bands correlated at 0.85 leaves one near-collapsed axis, and
+    a plain inverse turns its small eigenvalue into an enormous distance -- so a
+    good joint under nothing worse than an 8% dim scores as though it were
+    starved, and the test written to cut false calls generates them.
+
+    Measured over 400 draws at n=5: unregularised, the 99th percentile distance
+    for that dim is 12.7 against a threshold of 6.0. Regularised, the worst of
+    all 400 is 3.3.
+    """
+    plain, ridged = [], []
+    for seed in range(400):
+        s = _teachlike_samples(5, r=0.85, seed=seed)
+        plain.append(_dim_distance(s, _plain_inv(s)))
+        ridged.append(_dim_distance(s, rules._band_cov_inv(s)))
+
+    fail = config.BAND_MAHALANOBIS_FAIL
+    assert np.percentile(plain, 99) > fail, (
+        f"unregularised p99 is {np.percentile(plain, 99):.2f}, below the {fail} "
+        f"threshold -- the failure this test describes is not reproducing, so "
+        f"the ridge can no longer be justified from measurement")
+    assert max(ridged) < fail, (
+        f"a uniformly dimmed good joint scores up to {max(ridged):.2f} against "
+        f"a threshold of {fail} even WITH regularisation -- the fillet test is "
+        f"itself a source of false calls")
+    assert max(ridged) < 0.7 * fail, (
+        f"worst regularised distance {max(ridged):.2f} leaves under 30% margin "
+        f"below {fail}; real joints spread wider than these")
+
+
+def test_regularisation_keeps_the_starved_direction_expensive():
+    """Shrinkage must not flatten the test into uselessness: a joint that loses
+    its steep face while keeping the shallow one still has to score far away.
+
+    This is the other half of the trade. Bounding the weak axis costs sensitivity
+    along it, and the test is only worth having if what remains still separates
+    a starved joint from a dim corner of the board by a wide margin.
+    """
+    for seed in range(50):
+        s = _teachlike_samples(8, r=0.85, seed=seed)
+        g = _golden_like(s)
+        mean = s.mean(axis=0)
+
+        dimmed = (mean * 0.92)[None, :]               # all three down together
+        starved = mean.copy()
+        starved[0] = 0.0                              # low band collapses only
+
+        d_dim = float(rules.band_distance(dimmed, g)[0])
+        d_starved = float(rules.band_distance(starved[None, :], g)[0])
+
+        assert d_dim < config.BAND_MAHALANOBIS_FAIL < d_starved, (
+            f"seed {seed}: common-mode dimming scores {d_dim:.2f} and a starved "
+            f"joint {d_starved:.2f} against a threshold of "
+            f"{config.BAND_MAHALANOBIS_FAIL} -- the two are not separated")
+        assert d_starved > 4 * d_dim, (
+            f"seed {seed}: starved is only {d_starved / max(d_dim, 1e-9):.1f}x "
+            f"the cost of a brightness change; the covariance axis does no work")
+
+
+def test_the_ridge_bounds_the_condition_number_at_every_teach_size():
+    """5 to 20 golden boards, per section 10. The point of shrinking the
+    off-diagonals is to bound the condition number, so that is what is checked
+    -- unregularised it reaches four figures at n=5.
+    """
+    for n in (5, 8, 12, 20):
+        worst_plain = worst_ridged = 0.0
+        for seed in range(200):
+            s = _teachlike_samples(n, r=0.85, seed=seed)
+            worst_plain = max(worst_plain, np.linalg.cond(np.cov(s, rowvar=False)))
+            inv = rules._band_cov_inv(s)
+            assert np.all(np.isfinite(inv)), f"non-finite inverse at n={n}, seed={seed}"
+            worst_ridged = max(worst_ridged, np.linalg.cond(inv))
+        assert worst_ridged < 50.0, (
+            f"n={n}: regularised condition number reaches {worst_ridged:.1f}; a "
+            f"tiny deviation along the weak axis will read as a defect")
+        if n <= 8:
+            assert worst_plain > 5 * worst_ridged, (
+                f"n={n}: unregularised conditioning ({worst_plain:.1f}) is not "
+                f"materially worse than regularised ({worst_ridged:.1f})")
+
+
+def test_identical_golden_boards_do_not_produce_a_singular_inverse():
+    """The degenerate case: every golden board measures exactly the same. Real
+    enough on a synthetic renderer, and it must not divide by zero."""
+    identical = np.tile(BAND_MEAN, (8, 1))
+    inv = rules._band_cov_inv(identical)
+    assert np.all(np.isfinite(inv)), "identical golden boards gave a singular inverse"
+    g = _golden_like(identical)
+    d = float(rules.band_distance(BAND_MEAN[None, :], g)[0])
+    assert np.isfinite(d) and d < 1e-6, f"a joint at the golden mean scored {d}"
+
+
+def test_the_floor_not_the_ridge_is_what_bounds_the_distance():
+    """Which of the two regularisers does which job, pinned.
+
+    The docstring on `_band_cov_inv` used to credit the ridge for keeping a
+    good joint's distance small. Measurement says otherwise: the absolute floor
+    carries almost all of that, and with the ridge alone a dimmed good joint
+    still reaches 13 against a threshold of 6. The ridge earns its place on
+    conditioning instead.
+
+    If this test goes red, the attribution in that docstring is wrong again --
+    fix the docstring, not the assertion.
+    """
+    def worst_dim(ridge, floor):
+        old = (config.BAND_COV_RIDGE, config.BAND_COV_FLOOR)
+        config.BAND_COV_RIDGE, config.BAND_COV_FLOOR = ridge, floor
+        try:
+            return max(_dim_distance(_teachlike_samples(5, r=0.85, seed=i),
+                                     rules._band_cov_inv(
+                                         _teachlike_samples(5, r=0.85, seed=i)))
+                       for i in range(400))
+        finally:
+            config.BAND_COV_RIDGE, config.BAND_COV_FLOOR = old
+
+    fail = config.BAND_MAHALANOBIS_FAIL
+    shipped = worst_dim(0.15, 0.01)
+    floor_only = worst_dim(0.0, 0.01)
+    ridge_only = worst_dim(0.15, 1e-7)
+
+    assert floor_only < fail, (
+        f"the floor alone should hold the distance under {fail}; got {floor_only:.2f}")
+    assert ridge_only > fail, (
+        f"the ridge alone gives {ridge_only:.2f}, under the {fail} threshold -- "
+        f"if the ridge is now sufficient on its own, the docstring's account of "
+        f"which constant does what needs rewriting")
+    assert abs(shipped - floor_only) < 0.5 * fail, (
+        f"shipped ({shipped:.2f}) and floor-only ({floor_only:.2f}) should be "
+        f"close, since the floor is what bounds this")

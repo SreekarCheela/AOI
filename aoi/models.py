@@ -39,6 +39,7 @@ that run on any accelerator.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -133,7 +134,37 @@ def _group(packages, n) -> dict[str, np.ndarray]:
 
 
 def safe_name(package: str) -> str:
+    """Package name -> a filename-safe key.
+
+    Models are saved as `anomaly_{safe_name(pkg)}.pt` and both backends key
+    their loaded dict by the filename stem, so every LOOKUP has to go through
+    this too. It did not: `anomaly()` looked up by the raw package name, so any
+    package whose name contained a slash or a space loaded under one key and was
+    searched for under another, missed, and silently scored 0.0 -- a trained
+    model contributing nothing, with no error. Latent only because every name in
+    the hand-entered library happens to need no sanitising; the library is meant
+    to be generated from datasheets, where `SOT-23-6 / TSOT` is ordinary.
+    """
     return package.replace("/", "-").replace(" ", "_")
+
+
+def check_name_collisions(packages: "Iterable[str]") -> None:
+    """Refuse a package set whose names collide once sanitised.
+
+    `safe_name` is not injective -- `A/B` and `A-B` both become `A-B` -- so two
+    real packages can map to one filename and the second silently overwrites the
+    first. Every component of the losing package would then be scored by the
+    wrong model. Cheap to check, impossible to notice otherwise.
+    """
+    seen: dict[str, str] = {}
+    for pkg in packages:
+        key = safe_name(pkg)
+        if key in seen and seen[key] != pkg:
+            raise ValueError(
+                f"package names {seen[key]!r} and {pkg!r} both sanitise to "
+                f"{key!r}, so they would share one model file and the second "
+                f"would overwrite the first")
+        seen[key] = pkg
 
 
 class Backend(ABC):
@@ -189,7 +220,7 @@ class TorchBackend(Backend):
         x = self.torch.from_numpy(to_tensor(patches))
         out = np.zeros(len(x), np.float32)
         for pkg, idx in _group(packages, len(x)).items():
-            net = self.ae.get(pkg)
+            net = self.ae.get(safe_name(pkg))     # stored under the file stem
             if net is None:
                 continue
             with self.torch.no_grad():
@@ -230,7 +261,7 @@ class OnnxBackend(Backend):
         x = to_tensor(patches)
         out = np.zeros(len(x), np.float32)
         for pkg, idx in _group(packages, len(x)).items():
-            sess = self.ae.get(pkg)
+            sess = self.ae.get(safe_name(pkg))    # stored under the file stem
             if sess is None:
                 continue
             out[idx] = sess.run(None, {sess.get_inputs()[0].name: x[idx]})[0]
