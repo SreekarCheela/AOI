@@ -32,3 +32,40 @@ Key routing rules:
   not apply here.
 - Check `git log -1 --format='%an <%ae>%n%B'` after committing and before
   pushing. Fix it before it leaves the machine.
+
+## Pushing (the same two accounts, one layer down)
+
+`gh` on this machine holds both accounts, with `afterhoursadmins` active. Its
+credential helper only ever serves the **active** account — asking it for
+`SreekarCheela` returns nothing (verified on gh 2.94.0) — so a push authenticates
+as the wrong account, and because this repo is private GitHub answers
+`Repository not found` rather than a permission error. That 404 means the wrong
+token, not a missing repo.
+
+Fixed with repo-local config, which lives in `.git/config` and therefore **is
+not committed and does not survive a fresh clone**. After cloning, re-run:
+
+```bash
+git remote set-url origin https://SreekarCheela@github.com/SreekarCheela/AOI.git
+git config --local credential.https://github.com.helper ''
+git config --local --add credential.https://github.com.helper '!f() { test "$1" = get && printf "username=SreekarCheela\npassword=%s\n" "$(gh auth token --hostname github.com --user SreekarCheela)"; }; f'
+```
+
+The helper must stay on **one line**. A `\` line-continuation inside the single
+quotes is not a continuation — the backslash and newline end up inside the
+helper string and it silently stops working.
+
+The empty first `helper` resets the chain inherited from the global config, so
+`gh`'s default helper is bypassed **in this repo only** and every other repo on
+the machine is untouched. The helper shells out per call, so no token is written
+to disk and it keeps working when the token is refreshed.
+
+Verify without changing the active account:
+
+```bash
+gh api user --jq .login      # expect afterhoursadmins
+git ls-remote origin -h      # must succeed anyway
+```
+
+Do not "fix" a 404 by running `gh auth switch` — that changes global state the
+rest of the machine depends on. If you do switch for any reason, switch back.
