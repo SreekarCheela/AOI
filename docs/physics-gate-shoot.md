@@ -62,6 +62,22 @@ like a photograph.
       it. The reflection model assumes a vertical camera; a tilted one shifts
       every slope band
 
+**Room light: shoot in the dark.** The lamp must be the only light on the
+board. Room light lands equally in every frame, so it adds the same wash to
+`low`, `mid` and `high`, fills the near-black background the signal depends on,
+and flattens the between-frame contrast that *is* the measurement. Overhead
+lights are worse still: they sit near 90°, so they put a `high`-style flat-top
+highlight into all three frames. Mains-powered LED and fluorescent lights also
+flicker at 100/120 Hz, so at short shutter speeds each frame catches a different
+point in the cycle, and daylight drifts while you shoot. It does not need to be
+pitch black; you still need to see to move the lamp.
+
+- [ ] Room lights **off**, curtains closed, screens dimmed or turned away. A
+      dim phone screen for reading notes is fine
+- [ ] With the exposure locked and the lamp **off**, take one frame. It should
+      be essentially black. If you can make out the board, there is too much
+      ambient light: kill more of it before shooting the set
+
 **Exposure level:** the angled frames are *supposed* to look almost black with
 small bright highlights — that is the signal. Expose so the brightest solder
 highlights sit near the top of the histogram **without a large clipped area**.
