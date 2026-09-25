@@ -318,3 +318,30 @@ BODY_PRESENT_AREA: float = 0.12
 # lying flat 1.45-2.01, and this sits at the geometric midpoint with ~17% margin
 # on each side.
 BODY_STANDING_ASPECT: float = 1.20
+
+
+# ---- photo mode (aoi/photo, the phone/camera inspector) ----------------------
+# Photo mode inspects ordinary photographs against golden photographs of the same
+# board. None of the station optics above apply to it: its scale is whatever the
+# program measured at teach (a phone lands near 22 um/px), never UM_PER_PX.
+# Design and the evidence behind every number below:
+# ~/.gstack/projects/SreekarCheela-AOI/main-design-photo-aoi-app.md
+
+PHOTO_MIN_GOLDENS: int = 3              # one golden gives no spread to learn from
+# Focus gate: variance of the Laplacian of the 8-bit grey frame downscaled to
+# PHOTO_WORK_SIDE. Half the value measured on the 2026-09-25 fixture golden
+# (iPhone, 4032x3024), which read 388; its three test photos read 288-383.
+PHOTO_MIN_SHARPNESS: float = 194.0
+PHOTO_WORK_SIDE: int = 1600             # long side of the copy used for global checks
+PHOTO_MIN_FILL: float = 0.60            # board area / frame area
+PHOTO_MIN_PART_PX: int = 40             # smallest taught part's long side
+PHOTO_SCALE_TOL: float = 0.15           # test vs golden area scale
+PHOTO_REL_SHARPNESS: float = 0.5        # test sharpness vs golden median
+PHOTO_GLARE_LEVEL: int = 250            # max(B, G, R) at or above this is blown out
+PHOTO_MAX_GLARE_FRAC: float = 0.25      # of body pixels -> that part NOT CHECKED
+REG_MIN_OVERLAP_NCC: float = 0.5        # aligned photo must lie on the reference
+PHOTO_OFFSET_SIGMA_K: float = 3.0       # offset flagged above max(MAX_OFFSET_UM, k sigma)
+PHOTO_UNINSPECTED_FRAC: float = 0.10    # wholly uninspected parts before board REVIEW
+PHOTO_CALIBRATE_MIN_LABELS: int = 30    # operator labels before a score becomes P=
+PHOTO_CALIBRATE_MIN_PER_CLASS: int = 10
+PHOTO_TOMBSTONE_LENGTH: float = 0.70    # body length along pad axis vs golden

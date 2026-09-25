@@ -44,6 +44,7 @@ enough to run on a Pi.
 | `cli.py calibrate <image>` | measure µm/px and lens distortion from a dot-grid target |
 | `cli.py filter` | fit the false-call filter (§6C); `--demo` simulates production |
 | `cli.py audit` | random sample of what the filter suppressed, for hand-checking |
+| `inspect_photo.py` | missing and misplaced parts on ordinary photos — standalone, see below |
 
 `demo` takes `--backend none|torch|onnx`. The rule layer works with `none`, so
 the pipeline is useful before anything is trained.
@@ -116,6 +117,112 @@ photograph.
 joint, four frames, and `python cli.py shots --dir photos/`. A weekend, and the
 last cheap chance to find out the optical design needs rethinking before the
 optics are bought.
+
+## Photo AOI: placement inspection from ordinary photos
+
+`python -m aoi_photo` opens an offline desktop app (Tk, spec section 5: no web
+server, no network, nothing leaves the machine). It checks placed boards from
+photographs, separate from the station pipeline, which needs channel stacks,
+fiducials and a centroid file. It reports **missing**, **offset**, **skew**,
+**polarity**, **tombstone** and **wrong part**, with a box on every flagged part.
+Solder quality needs the rings and is out of scope.
+
+1. **Program** tab: click **Upload golden photos…** and add **at least 3**
+   photos of a good board. Between shots, pick the board up and put it back.
+   One photo can't show how much a good part varies, so every threshold would
+   be a guess. Then box each part
+   (`Propose boxes` draws them with the part detector, below), give its type, and for polarized parts
+   the marked end. Give the scale once (px/mm, or the board's long side in mm),
+   then save. Re-teaching writes a new version.
+2. **Inspect** tab: pick the program, click **Upload test photos…** (one per
+   board), and Run.
+3. **Review** tab: boxes on flagged parts, golden | test crops, and keys
+   D real defect / F false call / S skip / N next / U undo / R reshoot.
+4. **Stats** tab: false calls per part, by package. Spec section 8 says this is
+   the number that decides whether an AOI gets used.
+
+Photos: taken straight down, with the board filling at least 60% of the frame.
+The smallest part must be at least 40 px long. Use diffuse light, and the same
+camera and distance for golden and test photos. The app rejects photos that
+break these rules and says why. HEIC opens directly on macOS (through the
+built-in `sips`); elsewhere it needs `pip install pillow-heif`. JPEG needs nothing.
+
+Headless, for scripts:
+
+```bash
+python -m aoi_photo teach --golden photos/golden/ --parts parts.csv --name board --px-per-mm 45
+python -m aoi_photo inspect --program board photos/test/        # exit 0 pass, 1 review, 2 fail
+python -m aoi_photo stats
+```
+
+`parts.csv` has these columns: `refdes,x,y,w,h,type,package,polarized,marked_end`,
+in golden-1 pixels. Reports go to `out/photo_runs/<program>/<time>/`: an
+annotated PNG, a CSV, and a one-file HTML with no external assets. Operator
+labels go to `out/photo_aoi.db`.
+
+**Measured on the only real data so far.** The 2026-09-25 iPhone shoot of
+PT-PCB-004-03 has one golden and three test boards; the fixture is in
+`photos/fixtures/2026-09-25`, and tests skip when it is absent.
+
+| Defect | Truth | Found |
+|---|---|---|
+| Missing | 14 | 12 in and out of sample, 0 false calls |
+| Reversed diode (test1 D4) | 1 | POLARITY REVIEW |
+| Offset transistor (test1 T1, 0.42 mm) | 1 | OFFSET |
+| Wrong value by marking (R19) | 2 boards | not found |
+
+- **Missing parts:** the two misses are bare lands of dull solder that read as
+  a body on every feature tried.
+- **Polarity:** REVERSED needs 3 or more goldens.
+- **Marking:** a one-digit marking change is below what marking correlation
+  sees at ~45 px/mm.
+
+Scores are shown as `score`, not as probabilities, until a check has 30
+operator labels (10 of each kind); after that they are Platt-calibrated and
+shown as `P=`.
+
+**Unvalidated:** tombstone and wrong-part checks, until a real example exists.
+Neither colour class nor body size from a single golden was stable enough to
+use, so wrong-part needs 3 or more goldens.
+
+The same fixture is in single-golden mode (`--single-golden`, CLI and tests
+only), with fixed thresholds and every result stamped. Its missing-part model
+was fitted on these same photos.
+
+**Part detector (Propose boxes).** It's a small CNN, written in plain PyTorch,
+that marks every part body. Colour thresholds couldn't do this: tinned solder,
+leads and through-hole pads are the same colour as ceramic capacitors, so they
+were proposed as parts. Cutouts are excluded because the board mask now treats
+anything connected to the frame edge as background.
+
+The detector trains offline on:
+
+- every taught program;
+- the labelled shoots of PT-PCB-004-03, with the fixture golden's body boxes
+  carried onto each photo by registration;
+- the CC0 "PCB Component Detection" set, at low weight.
+
+No FPIC: its licence is non-commercial, no-derivatives. Retrain it with
+`python -m aoi_photo train-detector`, or with **Retrain detector** in the app,
+after teaching new boards. That takes about 45–85 minutes on an Apple-silicon
+Mac. The weights go to `out/models/part_detector.pt` (gitignored); without them,
+Propose boxes falls back to colour and says so.
+
+Measured on PT-PCB-004-03 so far. Trained without any iPhone photo and scored
+on the four iPhone shots:
+
+| | tight boxes (IoU ≥ 0.5) | false boxes |
+|---|---|---|
+| golden | 27 / 37 | 1 |
+| all four shots | 74% | 7 (precision 93%) |
+| colour method, golden | 18 / 37 | 39 |
+
+The shipped model, trained on those shots too, boxes all 37 golden parts with no
+false box, but that is in-sample. A board type it has never seen will score
+lower until it is taught.
+
+`inspect_photo.py` is the earlier one-script prototype. Its registration now
+lives in `aoi/photo/register.py`.
 
 ## Known limits
 
@@ -201,7 +308,11 @@ aoi/                     what the machine is told
 
 cli.py            demo / dataset / train / export / bench / review / yield
                   / shots / calibrate / filter / audit
-tests/            414 tests; see Tests above
+aoi/photo/        photo mode: io, register, features, judge, teach, inspect, record, report,
+                  detect / detect_train (the part-box detector)
+aoi_photo/        the offline desktop app (Tk) and its CLI
+inspect_photo.py  earlier photo prototype, kept for its synthetic tests
+tests/            522 tests; see Tests above
 examples/         output from `cli.py demo`, no hardware involved
 out/              generated — models, datasets, defect maps (gitignored)
 ```

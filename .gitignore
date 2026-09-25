@@ -16,3 +16,6 @@ photos/
 
 # macOS
 .DS_Store
+
+# Photo AOI programs: golden photos copied in at teach
+programs/
