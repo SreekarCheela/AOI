@@ -80,6 +80,13 @@ def load_image(path: str | Path, gamma: float | None = None) -> np.ndarray:
     a = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if a is None:
         raise ValueError(f"could not read {path}")
+    if a.dtype == np.uint8:
+        # IMREAD_UNCHANGED ignores the EXIF orientation tag, so a phone photo
+        # tagged "rotate 180" came back upside down relative to every viewer,
+        # and boxes marked in a viewer landed on the wrong parts. An 8-bit file
+        # has nothing IMREAD_COLOR can lose except alpha, which is dropped below
+        # anyway; 16-bit frames keep the UNCHANGED read and their full depth.
+        a = cv2.imread(str(path), cv2.IMREAD_COLOR)
     a = a.astype(np.float32) / (65535.0 if a.dtype == np.uint16 else 255.0)
     if a.ndim == 3:
         a = a[..., :3] @ np.array([0.0722, 0.7152, 0.2126], np.float32)   # BGR
