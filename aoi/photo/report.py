@@ -66,6 +66,18 @@ def _label(pr: PartResult) -> str:
     return text
 
 
+def found_at(pr: PartResult, result: BoardResult) -> tuple[float, float]:
+    """Top-left of where the part's body was found, in aligned golden-1 pixels.
+
+    dx_px, dy_px are net of the board-wide common shift and were measured in a
+    window already moved by the part's local re-registration, so both go back
+    on: taught box + local shift + common shift + offset."""
+    m = pr.measures or {}
+    sx, sy = result.common_shift_px
+    return (pr.part.x + m.get("local_dx", 0.0) + sx + pr.dx_px,
+            pr.part.y + m.get("local_dy", 0.0) + sy + pr.dy_px)
+
+
 def _scale(img: np.ndarray) -> tuple[int, float]:
     """Line thickness and font scale for an image this size (as inspect_photo.draw)."""
     t = max(1, int(round(max(img.shape[:2]) / 1500)))
@@ -97,9 +109,10 @@ def annotate(image_bgr: np.ndarray, result: BoardResult) -> np.ndarray:
 
     The image is already in golden-1 pixels, so each Part's box is where the
     part should be. That is drawn faint for every part; a flagged part gets a
-    thick box in its worst severity's colour where it was actually found (the
-    taught box moved by dx_px, dy_px). The verdict and the stamp go in a banner
-    drawn over the top of the photo, so the output is the input's shape.
+    thick box in its worst severity's colour where it was actually found
+    (`found_at`: the taught box moved by the local, common and part shifts).
+    The verdict and the stamp go in a banner drawn over the top of the photo,
+    so the output is the input's shape.
     """
     out = image_bgr.copy()
     H, W = out.shape[:2]
@@ -126,15 +139,32 @@ def annotate(image_bgr: np.ndarray, result: BoardResult) -> np.ndarray:
                 fs * 1.4, col, t + 1, cv2.LINE_AA)
 
     (_, lh), lbase = cv2.getTextSize("Ag", cv2.FONT_HERSHEY_SIMPLEX, fs, t)
-    for pr in result.parts:
-        if not pr.flagged:
-            continue
+    flagged = [pr for pr in result.parts if pr.flagged]
+    boxes = []
+    for pr in flagged:
         p = pr.part
         col = COLOURS[_worst(pr.flagged).severity]
-        x = int(round(p.x + pr.dx_px))
-        y = int(round(p.y + pr.dy_px))
+        fx, fy = found_at(pr, result)
+        x, y = int(round(fx)), int(round(fy))
         cv2.rectangle(out, (x, y), (x + p.w, y + p.h), col, 2 * t + 1)
-        _text(out, _label(pr), (x, max(y - 4 * t - lbase, bh + lh + 2)), col, fs, t)
+        boxes.append((pr, col, x, y))
+    # Labels after every box, each where it hides no earlier label: above its
+    # box, else below it, else stepped further up. A cluster of missing 0603s
+    # otherwise prints its labels on top of each other.
+    placed: list[tuple[int, int, int, int]] = []
+    step = lh + 2 * lbase + 2
+    for pr, col, x, y in boxes:
+        text = _label(pr)
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, t)
+        above = max(y - 4 * t - lbase, bh + lh + 2)
+        below = min(y + pr.part.h + lh + 4 * t, H - lbase - 1)
+        tries = [above, below] + [max(above - k * step, bh + lh + 2) for k in range(1, 8)]
+        for ty in tries:
+            r = (x, ty - lh - lbase, x + tw, ty + lbase)
+            if not any(r[0] < q[2] and q[0] < r[2] and r[1] < q[3] and q[1] < r[3] for q in placed):
+                break
+        placed.append((x, ty - lh - lbase, x + tw, ty + lbase))
+        _text(out, text, (x, ty), col, fs, t)
     return out
 
 
@@ -257,7 +287,7 @@ def write_html(result: BoardResult, annotated_bgr: np.ndarray,
         f"<dt>program</dt><dd>{_e(r.program)} v{_e(r.program_version)}"
         f"{' (single golden)' if r.single_golden else ''}</dd>"
         f"<dt>stamp</dt><dd>{_e(r.stamp) or '&mdash;'}</dd>"
-        f"<dt>scale</dt><dd>{r.px_per_mm:.2f} px/mm</dd>"
+        f"<dt>scale</dt><dd>{f'{r.px_per_mm:.2f} px/mm' if r.px_per_mm > 0 else 'none (offsets in px)'}</dd>"
         f"<dt>common shift</dt><dd>{sx:+.1f}, {sy:+.1f} px</dd>"
         f"<dt>noise</dt><dd>{r.noise_px:.2f} px</dd>"
         f"<dt>offset limit</dt><dd>{r.offset_limit_px:.1f} px</dd>"

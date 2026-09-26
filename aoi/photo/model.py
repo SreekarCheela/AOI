@@ -26,6 +26,7 @@ STATES: dict[str, str] = {
     "POLARITY REVIEW": "REVIEW",
     "MARKING DIFFERS": "REVIEW",
     "NOT CHECKED": "REVIEW",      # glare or outside the photo
+    "UNEXPECTED DIFFERENCE": "REVIEW",   # differs from golden 1 where no part was taught
     "UNINSPECTED": "INFO",        # golden spread makes this check undecidable
     "OK": "OK",
 }
@@ -34,6 +35,10 @@ UNVALIDATED_NOTE = "unvalidated on real boards"
 
 PART_TYPES = ("resistor", "capacitor", "diode", "led", "sot23", "regulator", "ic", "bridge", "other")
 MARKED_ENDS = ("left", "right", "top", "bottom", "none")
+# An UNEXPECTED DIFFERENCE is carried as a part of this type named DIFF1, DIFF2...
+# so the report, the record and Review show and adjudicate it like any part.
+DIFF_TYPE = "difference"
+DIFF_PREFIX = "DIFF"
 
 
 @dataclass

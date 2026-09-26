@@ -24,6 +24,7 @@ from .model import MARKED_ENDS, PART_TYPES, Part
 
 PARTS_COLUMNS = ["refdes", "x", "y", "w", "h", "type", "package", "polarized", "marked_end"]
 SINGLE_GOLDEN_STAMP = "single golden: fixed thresholds from the 2026-09-25 run"
+NO_SCALE_STAMP = "no scale: offsets in px"
 
 
 def _bool(v: str) -> bool:
@@ -95,8 +96,19 @@ class Program:
         return [self.path / g for g in self.goldens]
 
     @property
+    def spread_path(self) -> Path:
+        """Golden-to-golden difference spread (diff.spread_map); only with 2+ goldens."""
+        return self.path / "spread.npy"
+
+    @property
+    def has_scale(self) -> bool:
+        return self.px_per_mm > 0
+
+    @property
     def stamp(self) -> str:
-        return SINGLE_GOLDEN_STAMP if self.single_golden else ""
+        """What every result from this program carries: single golden, no scale."""
+        return "; ".join(s for s in (SINGLE_GOLDEN_STAMP if self.single_golden else "",
+                                     "" if self.has_scale else NO_SCALE_STAMP) if s)
 
     def part(self, refdes: str) -> Part:
         for p in self.parts:
@@ -127,24 +139,42 @@ class Program:
         return prog
 
 
+def _versions(base: Path, saved_only: bool) -> list[tuple[int, Path]]:
+    return sorted((int(p.name[1:]), p) for p in base.glob("v*")
+                  if p.name[1:].isdigit() and p.is_dir()
+                  and (not saved_only or (p / "program.json").exists()))
+
+
 def new_version_folder(root: str | Path, name: str) -> tuple[Path, int]:
-    """<root>/<name>/v<N>, one past the highest version already there."""
+    """<root>/<name>/v<N>, one past the highest version already there, created.
+
+    The folder is claimed with an exclusive mkdir, so two saves at once (two
+    windows, a CLI teach beside the app) get different versions instead of one
+    writing over the other; a folder left empty by a failed save still counts."""
     base = Path(root) / name
     base.mkdir(parents=True, exist_ok=True)
-    versions = [int(p.name[1:]) for p in base.glob("v*") if p.name[1:].isdigit()]
-    v = max(versions, default=0) + 1
-    return base / f"v{v}", v
+    for _ in range(1000):
+        v = max((n for n, _ in _versions(base, False)), default=0) + 1
+        folder = base / f"v{v}"
+        try:
+            folder.mkdir()
+        except FileExistsError:
+            continue
+        return folder, v
+    raise PhotoError(f"could not claim a new version folder under {base}")
 
 
 def latest(root: str | Path, name: str) -> Program:
+    """The highest saved version; folders without program.json (a save that
+    failed or is still being written) are skipped."""
     base = Path(root) / name
-    versions = sorted((int(p.name[1:]), p) for p in base.glob("v*") if p.name[1:].isdigit())
+    versions = _versions(base, True)
     if not versions:
         raise PhotoError(f"no program named {name!r} under {root}")
     return Program.load(versions[-1][1])
 
 
-def resolve(program: str | Path, root: str | Path = "programs") -> Program:
+def resolve(program: str | Path, root: str | Path = config.PHOTO_PROGRAMS_DIR) -> Program:
     """A program folder (…/v3), a program name folder (latest version), or a name under root."""
     p = Path(program)
     if (p / "program.json").exists():

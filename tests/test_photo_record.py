@@ -37,8 +37,8 @@ def pv(rec):
     return rec.program_version("demo", 1, "programs/demo", 3, 45.0, False)
 
 
-def _save(rec, pv, parts, board_calls=()):
-    run = rec.save_run(_result(parts, board_calls), pv)
+def _save(rec, pv, parts, board_calls=(), verdict="FAIL"):
+    run = rec.save_run(_result(parts, board_calls, verdict=verdict), pv)
     return run, {(c["refdes"], c["check"]): c["id"] for c in rec.calls(run)}
 
 
@@ -46,14 +46,14 @@ def _save(rec, pv, parts, board_calls=()):
 def test_schema_created_at_current_version(tmp_path):
     path = tmp_path / "nested" / "photo_aoi.db"
     with Record(path) as r:
-        assert r.version() == record.SCHEMA_VERSION == 2
+        assert r.version() == record.SCHEMA_VERSION == 3
         names = {row[0] for row in r.db.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"schema_version", "programs", "program_versions", "runs",
             "part_results", "calls", "adjudications"} <= names
     # reopening does not reapply the migration
     with Record(path) as r:
-        assert [row[0] for row in r.db.execute("SELECT version FROM schema_version")] == [1, 2]
+        assert [row[0] for row in r.db.execute("SELECT version FROM schema_version")] == [1, 2, 3]
 
 
 def test_newer_schema_is_refused(tmp_path):
@@ -152,7 +152,7 @@ def test_pending_or_skipped_stays_review(rec, flagged_run):
 
 def test_run_with_nothing_flagged_is_pass(rec, pv):
     run, _ = _save(rec, pv, [PartResult(_part("R1"), [Call("offset", "OK")]),
-                             PartResult(_part("R2"), [Call("marking", "UNINSPECTED")])])
+                             PartResult(_part("R2"), [Call("marking", "UNINSPECTED")])], verdict="PASS")
     assert rec.operator_status(run) == "PASS"
 
 
@@ -161,7 +161,7 @@ def test_board_level_reshoot_then_supersede(rec, pv):
     run, ids = _save(rec, pv, [PartResult(_part("R1"), [Call("offset", "OK")])], board)
     rec.adjudicate(ids[None, "view"], "R")
     assert rec.operator_status(run) == "REVIEW"
-    new, _ = _save(rec, pv, [PartResult(_part("R1"), [Call("offset", "OK")])])
+    new, _ = _save(rec, pv, [PartResult(_part("R1"), [Call("offset", "OK")])], verdict="PASS")
     rec.supersede(run, new)
     assert rec.operator_status(run) == "SUPERSEDED"
     assert rec.operator_status(new) == "PASS"
@@ -232,11 +232,12 @@ def test_stats_numerator_and_denominator(rec, pv):
     by = {s["group"]: s for s in rec.stats()}
     assert set(by) == {"resistor 0603", "capacitor 0805"}
     r = by["resistor 0603"]
-    # R4 NOT CHECKED and R5 UNINSPECTED were never judged: 6 parts -> 4 inspected
-    assert r["parts_inspected"] == 4
+    # R4 NOT CHECKED was never judged; R5's UNINSPECTED is a marking check and
+    # its presence was still judged: 6 parts -> 5 inspected
+    assert r["parts_inspected"] == 5
     assert r["fail_calls"] == 2
     assert r["false_calls"] == 1
-    assert r["fcr"] == pytest.approx(1 / 4)
+    assert r["fcr"] == pytest.approx(1 / 5)
     assert r["review_calls"] == 2
     assert r["review_resolved_ok"] == 2
     assert r["boards"] == 1
@@ -245,8 +246,8 @@ def test_stats_numerator_and_denominator(rec, pv):
     assert by["capacitor 0805"]["fcr"] == 0.0
 
     total = rec.stats_total()
-    assert total["parts_inspected"] == 5 and total["false_calls"] == 1
-    assert total["fcr"] == pytest.approx(1 / 5)
+    assert total["parts_inspected"] == 6 and total["false_calls"] == 1
+    assert total["fcr"] == pytest.approx(1 / 6)
     assert total["boards"] == 1
     assert set(total) == set(r)
 
@@ -296,7 +297,7 @@ def test_labels_for_calibration(rec, pv):
     assert rec.labels("tombstone") == []
 
 
-def test_v1_file_migrates_to_v2_and_keeps_report_paths(tmp_path):
+def test_v1_file_migrates_to_current_and_keeps_report_paths(tmp_path):
     """A photo_aoi.db written at schema 1 gains the report-path columns in place."""
     import sqlite3
     from aoi.photo import record
@@ -307,7 +308,48 @@ def test_v1_file_migrates_to_v2_and_keeps_report_paths(tmp_path):
                       + "INSERT INTO schema_version (version, applied) VALUES (1, 'then');")
     con.close()
     with record.Record(f) as rec:
-        assert rec.version() == record.SCHEMA_VERSION == 2
+        assert rec.version() == record.SCHEMA_VERSION == 3
         cols = {r[1] for r in rec.db.execute("PRAGMA table_info(runs)")}
         assert {"annotated", "html"} <= cols
         assert rec.runs() == []
+
+
+def test_v2_file_gains_part_boxes_and_old_rows_read_as_none(tmp_path):
+    """Schema 3 adds where each part was found; rows from before it have no box."""
+    import sqlite3
+    from aoi.photo import record
+    f = tmp_path / "v2.db"
+    con = sqlite3.connect(f)
+    con.executescript("CREATE TABLE schema_version (version INTEGER NOT NULL, applied TEXT);"
+                      + record.MIGRATIONS[1] + record.MIGRATIONS[2]
+                      + "INSERT INTO schema_version (version, applied) VALUES (2, 'then');"
+                      + "INSERT INTO programs (id, name) VALUES (1, 'b');"
+                      + "INSERT INTO program_versions (id, program_id, version, created, path,"
+                        " n_goldens, px_per_mm, single_golden) VALUES (1, 1, 1, 'then', 'p', 1, 0, 1);"
+                      + "INSERT INTO runs (id, program_version_id, image, created, machine_verdict,"
+                        " reasons_json, stamp) VALUES (1, 1, 'a.jpg', 'then', 'FAIL', '[]', '');"
+                      + "INSERT INTO part_results (id, run_id, refdes, type, package, state)"
+                        " VALUES (1, 1, 'R1', 'resistor', '', 'MISSING');"
+                      + "INSERT INTO calls (run_id, part_result_id, refdes, check_name, state,"
+                        " severity, calibrated, detail) VALUES (1, 1, 'R1', 'missing', 'MISSING',"
+                        " 'FAIL', 0, '');")
+    con.close()
+    with record.Record(f) as rec:
+        assert rec.version() == 3
+        [c] = rec.calls(1)
+        assert c["box"] is None and c["part_type"] == "resistor"
+
+
+def test_saved_run_carries_found_box(tmp_path):
+    from aoi.photo import record
+    from aoi.photo.model import BoardResult, Call, Part, PartResult
+    res = BoardResult(image="t.jpg", program="b", program_version=1, verdict="FAIL",
+                      common_shift_px=(2.0, -1.0))
+    pr = PartResult(Part("R1", 100, 200, 30, 12, "resistor"), calls=[Call("missing", "MISSING")],
+                    dx_px=5.0, dy_px=0.0, measures={"local_dx": 1.0, "local_dy": 3.0})
+    res.parts.append(pr)
+    with record.Record(tmp_path / "r.db") as rec:
+        pv = rec.program_version("b", 1, "p", 1, 0.0, True)
+        run = rec.save_run(res, pv)
+        [c] = rec.calls(run)
+    assert c["box"] == (108.0, 202.0, 30.0, 12.0)

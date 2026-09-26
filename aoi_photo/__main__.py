@@ -1,7 +1,7 @@
 """Photo AOI entry point.
 
     python -m aoi_photo                         the desktop app
-    python -m aoi_photo teach   --golden DIR --parts parts.csv --name NAME (--px-per-mm X | --board-width-mm W)
+    python -m aoi_photo teach   --golden DIR --parts parts.csv --name NAME [--px-per-mm X | --board-width-mm W]
     python -m aoi_photo inspect --program NAME DIR_OR_PHOTO
     python -m aoi_photo stats
     python -m aoi_photo train-detector          retrain the part-box detector from taught boards
@@ -16,15 +16,31 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-PROGRAMS = Path("programs")
-RUNS = Path("out/photo_runs")
-DB = Path("out/photo_aoi.db")
+from aoi import config
+
+# Resolved against the repository, so launching from another folder uses the same files.
+PROGRAMS = config.PHOTO_PROGRAMS_DIR
+RUNS = config.PHOTO_RUNS_DIR
+DB = config.PHOTO_DB
 
 
 def cmd_teach(a: argparse.Namespace) -> int:
     from aoi.photo import io, program, teach
-    goldens = io.photo_files(a.golden)
-    parts = program.read_parts_csv(a.parts)
+    try:
+        goldens = io.photo_files(a.golden)
+        parts = program.read_parts_csv(a.parts)
+    except io.PhotoError as e:
+        print(f"NOT SAVED: {e}", file=sys.stderr)
+        return 2
+    if not goldens:
+        print(f"NOT SAVED: no photos in {a.golden}", file=sys.stderr)
+        return 2
+    tests = [f.name for f in goldens if f.stem.lower().startswith("test")]
+    if tests:
+        print(f"NOT SAVED: the golden photos include {', '.join(tests)}, which look like test boards. "
+              "Put only golden photos in the --golden folder, or pass golden files one at a time.",
+              file=sys.stderr)
+        return 2
     try:
         rep = teach.build_program(a.name, goldens, parts, px_per_mm=a.px_per_mm,
                                   board_width_mm=a.board_width_mm, root=a.programs,
@@ -36,9 +52,10 @@ def cmd_teach(a: argparse.Namespace) -> int:
         print(f"NOT SAVED: {e}", file=sys.stderr)
         return 2
     p = rep.program
+    scale = f"{p.px_per_mm:.1f} px/mm" if p.px_per_mm > 0 else "no scale (offsets in px)"
     print(f"program {p.name} v{p.version}: {len(p.parts)} parts, {len(p.goldens)} golden(s), "
-          f"{p.px_per_mm:.1f} px/mm -> {p.path}")
-    if p.single_golden:
+          f"{scale} -> {p.path}")
+    if p.stamp:
         print(f"  {p.stamp}")
     if rep.selfcheck_flags:
         print("  self-check accepted as intended: " + ", ".join(r for r, _ in rep.selfcheck_flags))
@@ -50,9 +67,13 @@ def cmd_teach(a: argparse.Namespace) -> int:
 
 def cmd_inspect(a: argparse.Namespace) -> int:
     from aoi.photo import inspect as I, io, judge, program, record, report
-    prog = program.resolve(a.program, a.programs)
-    golden = I.Golden(prog)
-    photos = io.photo_files(a.photos)
+    try:
+        prog = program.resolve(a.program, a.programs)
+        golden = I.Golden(prog)
+        photos = io.photo_files(a.photos)
+    except io.PhotoError as e:
+        print(f"cannot inspect: {e}", file=sys.stderr)
+        return 2
     if not photos:
         print(f"no photos in {a.photos}", file=sys.stderr)
         return 2
@@ -130,9 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--golden", required=True, help="folder of golden photos (golden 1 = first by name)")
     t.add_argument("--parts", required=True, help="refdes,x,y,w,h,type,package,polarized,marked_end")
     t.add_argument("--name", required=True)
-    s = t.add_mutually_exclusive_group(required=True)
-    s.add_argument("--px-per-mm", type=float)
-    s.add_argument("--board-width-mm", type=float, help="board's long side, measured once")
+    s = t.add_mutually_exclusive_group()
+    s.add_argument("--px-per-mm", type=float, help="optional; without a scale offsets are judged and shown in px")
+    s.add_argument("--board-width-mm", type=float, help="optional: board's long side, measured once")
     t.add_argument("--accept-selfcheck", help="REFDES,... or 'all': golden parts off their outline are intended")
     t.add_argument("--single-golden", action="store_true",
                    help="allow one golden (tests/CLI only): fixed thresholds, every result stamped")
@@ -144,8 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("stats", help="false calls per package from operator labels")
     st.set_defaults(fn=cmd_stats)
     td = sub.add_parser("train-detector", help="retrain the part-box detector from taught boards (offline)")
-    td.add_argument("--photos", default="photos", help="labelled photo shoots")
-    td.add_argument("--weights", default="out/models/part_detector.pt")
+    td.add_argument("--photos", default=str(config.PHOTO_SHOOTS_DIR), help="labelled photo shoots")
+    td.add_argument("--weights", default=str(config.PHOTO_DETECTOR_WEIGHTS))
     td.add_argument("--iters", type=int, default=4000)
     td.add_argument("--no-cc0", action="store_true", help="leave out the CC0 public PCB set")
     td.set_defaults(fn=cmd_train_detector)

@@ -127,30 +127,48 @@ fiducials and a centroid file. It reports **missing**, **offset**, **skew**,
 **polarity**, **tombstone** and **wrong part**, with a box on every flagged part.
 Solder quality needs the rings and is out of scope.
 
-1. **Program** tab: click **Upload golden photos…** and add **at least 3**
-   photos of a good board. Between shots, pick the board up and put it back.
-   One photo can't show how much a good part varies, so every threshold would
-   be a guess. Then box each part
-   (`Propose boxes` draws them with the part detector, below), give its type, and for polarized parts
-   the marked end. Give the scale once (px/mm, or the board's long side in mm),
-   then save. Re-teaching writes a new version.
-2. **Inspect** tab: pick the program, click **Upload test photos…** (one per
-   board), and Run.
-3. **Review** tab: boxes on flagged parts, golden | test crops, and keys
-   D real defect / F false call / S skip / N next / U undo / R reshoot.
-4. **Stats** tab: false calls per part, by package. Spec section 8 says this is
-   the number that decides whether an AOI gets used.
+Nothing has to be drawn or named. Nine clicks from launch to a box on a defect:
 
-Photos: taken straight down, with the board filling at least 60% of the frame.
-The smallest part must be at least 40 px long. Use diffuse light, and the same
-camera and distance for golden and test photos. The app rejects photos that
-break these rules and says why. HEIC opens directly on macOS (through the
-built-in `sips`); elsewhere it needs `pip install pillow-heif`. JPEG needs nothing.
+1. **Set up board**: click **Upload golden photos…**. The part detector boxes
+   every part as P1, P2, … on its own. Delete any box that is not a part, and
+   for the few polarized parts pick *Diode/LED* or *IC/transistor*, which is
+   what turns the polarity check on. Renaming (R12 instead of P12) and the
+   board length in mm are optional: without a length, offsets are judged
+   against the board's own noise and reported in pixels. Save. A checklist
+   beside Save says what, if anything, is still missing.
+   - One golden works, and every result says "single golden". For real
+     thresholds use **3 goldens from 3 different good boards**. Shots of one
+     board teach nothing about how solder and flux vary; the same shot twice
+     is refused.
+2. **Inspect boards**: pick the program, click **Upload test photos…** (one
+   per board) and **Run**. Click a board to see its photo with the defect
+   boxes; **Review calls →** opens it in Results.
+3. **Results**: boxes on flagged parts, golden | test crops, and buttons (or
+   keys) for real defect D, false call F, skip S, next N, undo U, and reshoot R
+   (board calls only). **False-call stats** is the second page: false calls by
+   package, which spec section 8 says decides whether an AOI gets used.
+   **Advanced** menu: parts.csv import/export and Retrain detector.
+
+**Whole-board difference.** Every test photo is also compared with golden 1
+everywhere, not just inside part boxes (`aoi/photo/diff.py`). A difference
+away from every taught part is reported as **UNEXPECTED DIFFERENCE** (DIFF1,
+DIFF2, …, REVIEW): a part the detector never boxed that is now missing, or
+something on the board that should not be there. On the fixture, a board
+taught without a C7 box still gets a box on the missing C7. Differences on
+bare tinned metal are ignored: two boards' solder finish differs, and no part
+can go missing from a bare trace.
+
+Photos: taken straight down. The board must fill at least 20% of the frame and
+be at least 1500 px long, and the smallest part at least 40 px long. Use
+diffuse light, and the same camera and distance for golden and test photos
+(within ±15%). The app rejects photos that break these rules and says why.
+HEIC opens directly on macOS (through the built-in `sips`); elsewhere it needs
+`pip install pillow-heif`. JPEG needs nothing.
 
 Headless, for scripts:
 
 ```bash
-python -m aoi_photo teach --golden photos/golden/ --parts parts.csv --name board --px-per-mm 45
+python -m aoi_photo teach --golden photos/golden/ --parts parts.csv --name board   # --board-width-mm W optional
 python -m aoi_photo inspect --program board photos/test/        # exit 0 pass, 1 review, 2 fail
 python -m aoi_photo stats
 ```

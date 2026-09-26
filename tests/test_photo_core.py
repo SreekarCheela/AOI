@@ -98,7 +98,7 @@ def test_fewer_than_three_goldens_refused_unless_single_golden():
 def test_program_versions_and_resolve(tmp_path):
     for _ in range(2):
         folder, v = program.new_version_folder(tmp_path, "board")
-        g = folder / "golden_01.jpg"; folder.mkdir(parents=True); cv2.imwrite(str(g), np.zeros((8, 8, 3), np.uint8))
+        g = folder / "golden_01.jpg"; cv2.imwrite(str(g), np.zeros((8, 8, 3), np.uint8))
         program.Program("board", v, 45.0, [Part("R1", 0, 0, 4, 4)], [g.name], folder=str(folder)).save()
     p = program.resolve("board", tmp_path)
     assert p.version == 2 and p.parts[0].refdes == "R1"
@@ -187,10 +187,13 @@ def test_tombstone_short_body_one_end_bare():
 
 
 def test_wrong_part_only_against_golden_spread():
-    big = meas(body_t=body(area=12000.0, short=90.0))
+    big = meas(body_t=body(area=30000.0, short=90.0))
     assert state(big, single=True) == "OK"             # one golden cannot say what normal size is
     stats = {"log_area": (0.0, 0.05, 3), "log_width": (0.0, 0.05, 3), "missing_logit": (PLACED, 0.5, 3)}
     assert state(big, stats=stats, single=False) == "WRONG PART"
+    # 2.4x the area is within what good parts varied against one golden on the
+    # fixture (up to 4x), so a golden set with almost no spread cannot call it
+    assert state(meas(body_t=body(area=12000.0, short=60.0)), stats=stats, single=False) == "OK"
 
 
 def test_polarity_band_rules():

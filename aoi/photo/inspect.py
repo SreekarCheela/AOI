@@ -1,7 +1,14 @@
 """One test photo, judged against a taught program.
 
     load -> gate -> align onto golden 1 -> measure every part -> board noise
-         -> judge every part -> board-level checks -> board verdict
+         -> judge every part -> whole-board difference -> board-level checks
+         -> board verdict
+
+The whole-board difference (diff.py) needs no part boxes. Where it finds the
+test board differing from golden 1 away from every taught part, the result
+carries an UNEXPECTED DIFFERENCE part (DIFF1, DIFF2...): a part the detector
+never boxed and that is now missing, or something on the board that should not
+be there.
 
 A photo that cannot be aligned, or was shot at another distance or out of focus,
 is REVIEW with the reason and no part is judged: every per-part number would be
@@ -14,10 +21,11 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import config
 from . import features as F
 from . import gate, judge, register
 from .io import grey, load_bgr
-from .model import BoardResult, Call
+from .model import DIFF_PREFIX, DIFF_TYPE, BoardResult, Call, Part, PartResult
 from .program import Program
 
 
@@ -30,6 +38,50 @@ class Golden:
         self.grey = grey(self.bgr)
         self.frame = F.Frame.of(self.bgr)
         self.sharpness = float(np.median([gate.sharpness(load_bgr(p)) for p in program.golden_paths()]))
+        sp = program.spread_path
+        self.spread = np.load(sp) if sp.exists() else None
+        self._board_mask: np.ndarray | None = None
+
+    @property
+    def board_mask(self) -> np.ndarray:
+        if self._board_mask is None:
+            self._board_mask = gate.board_mask(self.bgr)
+        return self._board_mask
+
+
+def _grown(p: Part, pad: float) -> tuple[int, int, int, int]:
+    m = pad * max(p.w, p.h)
+    return int(p.x - m), int(p.y - m), int(p.w + 2 * m), int(p.h + 2 * m)
+
+
+def differences(res: BoardResult, program: Program, golden: Golden, warped: np.ndarray,
+                cover: np.ndarray | None) -> None:
+    """Whole-board difference blobs off every taught part -> UNEXPECTED DIFFERENCE parts."""
+    from . import diff
+    min_side = min((max(p.w, p.h) for p in program.parts), default=0) or None
+    try:
+        blobs = diff.diff_blobs(golden.bgr, warped, cover, spread=golden.spread,
+                                board_mask=golden.board_mask, min_side_px=min_side)
+    except ValueError as e:
+        res.reasons.append(f"whole-board difference not run: {e}")
+        return
+    grown = [_grown(p, config.PHOTO_DIFF_PART_PAD) for p in program.parts]
+    off = [b for b in blobs
+           if not any(diff.overlap(b, g) >= config.PHOTO_DIFF_ON_PART for g in grown)
+           and diff.metal_fraction(golden.bgr, b) < config.PHOTO_DIFF_MAX_GOLDEN_METAL]
+    shown = off[:config.PHOTO_DIFF_MAX_CALLS]
+    for i, b in enumerate(shown, 1):
+        part = Part(f"{DIFF_PREFIX}{i}", b.x, b.y, b.w, b.h, type=DIFF_TYPE)
+        res.parts.append(PartResult(part, calls=[Call(
+            "difference", "UNEXPECTED DIFFERENCE",
+            "differs from golden 1 where no part was taught: an unboxed part missing or moved, "
+            "or something on the board that should not be there",
+            score=min(1.0, b.score / 2.0), measured_against="golden 1, whole board")]))
+    if len(off) > len(shown):
+        res.board_calls.append(Call("board", "NOT CHECKED",
+                                    f"{len(off)} places differ from golden 1 off the taught parts; "
+                                    f"the {len(shown)} strongest are listed. Is this the same board, "
+                                    "lit the same way?", measured_against="golden 1, whole board"))
 
 
 def _board_review(res: BoardResult, detail: str) -> BoardResult:
@@ -68,13 +120,16 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
         res.parts.append(judge.judge_part(p, measures[p.refdes], noise=noise, px_per_mm=program.px_per_mm,
                                           stats=program.golden_stats.get(p.refdes),
                                           single_golden=program.single_golden))
+    if config.PHOTO_DIFF:
+        differences(res, program, golden, warped, cover)
     shift = math.hypot(noise["dx"], noise["dy"])
-    if shift > res.offset_limit_px:
-        um = shift / program.px_per_mm * 1000
+    if res.offset_limit_px > 0 and shift > res.offset_limit_px:
         res.board_calls.append(Call("board", "NOT CHECKED",
-                                    f"whole board shifted {um:.0f} um: camera tilt or a systematic "
-                                    "placement offset", measured_against="all parts together"))
-    if program.px_per_mm and res.offset_limit_px > 0.150 * program.px_per_mm + 1e-6:
+                                    f"whole board shifted {judge.length_text(shift, program.px_per_mm)}: "
+                                    "camera tilt or a systematic placement offset",
+                                    measured_against="all parts together"))
+    # only a program with a scale has a spec in um to fall short of
+    if program.px_per_mm > 0 and res.offset_limit_px > 0.150 * program.px_per_mm + 1e-6:
         res.reasons.append("offset resolution worse than spec on this photo "
                            f"(3 sigma = {res.offset_limit_px / program.px_per_mm * 1000:.0f} um > 150 um)")
     if calibrators:

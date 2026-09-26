@@ -70,13 +70,63 @@ def load_bgr(path: str | Path) -> np.ndarray:
     if ext not in LDR_EXT:
         raise PhotoError(f"{path.name}: unsupported file type {ext!r} "
                          f"(use {', '.join(sorted(PHOTO_EXT))})")
-    # IMREAD_COLOR applies the EXIF orientation tag; IMREAD_UNCHANGED does not.
-    a = cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_ANYDEPTH)
+    # The EXIF orientation is applied here, not left to cv2. For JPEG and PNG,
+    # cv2 decodes the stored pixels and the tag, read by PIL, turns them. cv2's
+    # own handling is not dependable elsewhere: on a TIFF carrying the tag it
+    # fails to decode at all for turned orientations (OpenCV 5.0: "Internal
+    # imread issue") and turns the mirrored ones itself. So any other format
+    # with a tag, and anything cv2 cannot decode, goes through PIL with
+    # ImageOps.exif_transpose.
+    orient = _orientation(path)
+    a = None
+    if orient == 1 or ext in (".jpg", ".jpeg", ".png"):
+        a = cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_ANYDEPTH | cv2.IMREAD_IGNORE_ORIENTATION)
+        if a is not None:
+            a = _orient(a, orient)
     if a is None:
-        raise PhotoError(f"{path.name}: could not be decoded")
+        a = _via_pil(path)
     if a.dtype != np.uint8:
         a = (a.astype(np.float32) * (255.0 / np.iinfo(a.dtype).max)).round().astype(np.uint8)
     return a
+
+
+def _orientation(path: Path) -> int:
+    """The EXIF orientation tag (1 = upright), 1 when there is none or PIL cannot read it."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            v = int(im.getexif().get(0x0112, 1) or 1)
+    except Exception:
+        return 1
+    return v if 1 <= v <= 8 else 1
+
+
+def _orient(a: np.ndarray, tag: int) -> np.ndarray:
+    """Stored pixels turned upright, as PIL.ImageOps.exif_transpose would."""
+    t = {1: lambda x: x,
+         2: lambda x: x[:, ::-1],
+         3: lambda x: x[::-1, ::-1],
+         4: lambda x: x[::-1],
+         5: lambda x: x.swapaxes(0, 1),
+         6: lambda x: np.rot90(x, -1),
+         7: lambda x: x[::-1, ::-1].swapaxes(0, 1),
+         8: lambda x: np.rot90(x, 1)}[tag](a)
+    return np.ascontiguousarray(t)
+
+
+def _via_pil(path: Path) -> np.ndarray:
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(path) as im:
+            im = ImageOps.exif_transpose(im)
+            if im.mode in ("I;16", "I;16B", "I;16L", "I"):
+                a = np.asarray(im).astype(np.float32)
+                a = (a * (255.0 / max(float(a.max()), 1.0)) if im.mode == "I" else a / 257.0)
+                g = np.clip(a, 0, 255).astype(np.uint8)
+                return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+            return cv2.cvtColor(np.asarray(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        raise PhotoError(f"{path.name}: could not be decoded ({type(e).__name__})") from None
 
 
 def grey(bgr: np.ndarray) -> np.ndarray:

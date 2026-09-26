@@ -23,6 +23,13 @@ Deferred from the Photo AOI plan (~/.gstack/projects/SreekarCheela-AOI/main-desi
 - **Detector training speed** (P3, S). About 1.3 s per iteration on MPS; a
   from-scratch run is about 85 minutes. Try a smaller tile or fewer iterations
   when fine-tuning from the last model.
+- **U1 OFFSET false call with auto boxes, no scale** (P2, S). test3 flags U1
+  OFFSET when taught from detector boxes without a board length; with a length
+  the 150 um floor absorbs it. A floor in px for no-scale programs (e.g. from
+  the smallest part's size) would fix it.
+- **Whole-board difference on a board it was not tuned on** (P2, M). diff.py's
+  constants and the bare-metal / part-ownership rules were set on the fixture
+  (in-sample). Measure on a second board type before trusting its false-box rate.
 - **autoplan phase dispatch blocked** (tooling). gstack's phase-publication-hook
   refuses native reviewer Agent dispatch in this Claude Code build; the Design,
   DX and Eng review phases of this plan did not run.

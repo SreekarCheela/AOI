@@ -38,6 +38,13 @@ MISSING_P = 0.75
 MISSING_Z = 4.0                 # multi-golden: z of the missing logit over golden spread
 MISSING_SPREAD_MAX = 2.0        # golden logit sd above this -> UNINSPECTED (undecidable)
 LOGIT_SD_FLOOR = 0.25
+# The multi-golden missing cutoff (golden mean + MISSING_Z sd) is held between
+# the single-golden one and the lowest logit of a missing part the model caught
+# on the fixture (2.84). Goldens that are nearly the same shot measure almost no
+# spread; unclamped, their cutoff sat below good parts on other boards (false
+# MISSING, core audit s2b), and never tighter than single golden is the floor.
+MISSING_CUT_SINGLE = math.log(MISSING_P / (1.0 - MISSING_P))    # 1.10
+MISSING_CUT_MAX = 2.75
 
 # Polarity, cathode band / bevel: both ends of the profile must be clearly
 # different (|contrast| >= 1.5 profile sd) and on opposite ends. On the fixture
@@ -46,13 +53,26 @@ LOGIT_SD_FLOOR = 0.25
 STRIPE_CLEAR = 1.5
 TURN_REVIEW = -0.20             # marking correlation margin, 0 vs 180 deg
 WRONG_PART_Z = 4.0
+# Body-size spread floors and ceilings (log ratio sd). Floors: on the fixture,
+# correctly placed parts measured |log area ratio| up to 1.40 and |log width
+# ratio| up to 1.02 against one golden, so WRONG_PART_Z x floor sits above both;
+# a spread measured from goldens that barely differ cannot tighten it further.
+# Ceilings keep a wildly varying golden set from switching the check off.
+LOG_AREA_SD = (0.35, 0.50)
+LOG_WIDTH_SD = (0.26, 0.375)
 
 
-def _z(v: float, stat) -> float:
+def _z(v: float, stat, sd_range: tuple[float, float] = (0.05, float("inf"))) -> float:
     if not stat:
         return 0.0
     mu, sd = stat[0], stat[1]
-    return (v - mu) / max(sd, 0.05)
+    return (v - mu) / min(max(sd, sd_range[0]), sd_range[1])
+
+
+def missing_cut(mu: float, sd: float) -> float:
+    """Multi-golden missing-logit cutoff, never tighter than single golden and
+    never looser than MISSING_CUT_MAX."""
+    return min(max(mu + MISSING_Z * max(sd, LOGIT_SD_FLOOR), MISSING_CUT_SINGLE), MISSING_CUT_MAX)
 
 
 def _sigmoid(z: float) -> float:
@@ -76,7 +96,8 @@ def board_noise(measures: dict[str, dict]) -> dict:
     """Common shift (camera-tilt parallax) and placement noise over the parts that
     are there, so one displaced part cannot drag either."""
     ok = [m for m in measures.values()
-          if m.get("in_view") and _sigmoid(missing_logit(m)) < MISSING_P]
+          if m.get("in_view") and _sigmoid(missing_logit(m)) < MISSING_P
+          and not any(math.isnan(m[k]) for k in ("dx", "dy", "dth"))]
     if len(ok) < 5:
         return dict(dx=0.0, dy=0.0, sigma=0.0, sigma_deg=0.0, n=len(ok))
     dx = np.array([m["dx"] for m in ok]); dy = np.array([m["dy"] for m in ok])
@@ -89,7 +110,14 @@ def board_noise(measures: dict[str, dict]) -> dict:
 
 
 def offset_limit_px(px_per_mm: float, sigma: float) -> float:
-    return max(config.MAX_OFFSET_UM / 1000.0 * px_per_mm, config.PHOTO_OFFSET_SIGMA_K * sigma)
+    """max(150 um, k sigma) in px; with no scale (px_per_mm 0) only k sigma is known."""
+    k = config.PHOTO_OFFSET_SIGMA_K * sigma
+    return max(config.MAX_OFFSET_UM / 1000.0 * px_per_mm, k) if px_per_mm > 0 else k
+
+
+def length_text(px: float, px_per_mm: float) -> str:
+    """An offset as a person reads it: um when the program has a scale, px when not."""
+    return f"{px / px_per_mm * 1000:.0f} um" if px_per_mm > 0 else f"{px:.1f} px"
 
 
 # ----------------------------------------------------------------- one part
@@ -97,7 +125,8 @@ def judge_part(p: Part, m: dict, *, noise: dict, px_per_mm: float, stats: dict |
                single_golden: bool) -> PartResult:
     pr = PartResult(p, measures=m)
     if not m.get("in_view"):
-        pr.calls.append(Call("view", "NOT CHECKED", "outside this photo", measured_against="photo coverage"))
+        pr.calls.append(Call("view", "NOT CHECKED", m.get("view_note") or "outside this photo",
+                             measured_against="photo coverage"))
         return pr
     if m["glare"] > config.PHOTO_MAX_GLARE_FRAC:
         pr.calls.append(Call("glare", "NOT CHECKED",
@@ -120,14 +149,18 @@ def judge_part(p: Part, m: dict, *, noise: dict, px_per_mm: float, stats: dict |
                                  f"good parts vary too much between golden shots (logit sd {sd:.1f})",
                                  measured_against="golden spread"))
             return pr
-        zz = (z - mu) / max(sd, LOGIT_SD_FLOOR)
-        if zz > MISSING_Z:
-            pr.calls.append(Call("missing", "MISSING", f"{zz:.1f} sd from the goldens",
-                                 _sigmoid(zz - MISSING_Z), False, against))
+        cut = missing_cut(mu, sd)
+        if z > cut:
+            zz = (z - mu) / max(sd, LOGIT_SD_FLOOR)
+            pr.calls.append(Call("missing", "MISSING",
+                                 f"{zz:.1f} sd from the goldens (logit {z:+.1f}, cutoff {cut:+.1f})",
+                                 _sigmoid(z - cut), False, against))
             return pr
 
     # body is there: record where it sits, net of the board-wide shift
-    pr.dx_px, pr.dy_px, pr.dtheta_deg = m["dx"] - noise["dx"], m["dy"] - noise["dy"], m["dth"]
+    placed = not any(math.isnan(m[k]) for k in ("dx", "dy", "dth"))
+    if placed:
+        pr.dx_px, pr.dy_px, pr.dtheta_deg = m["dx"] - noise["dx"], m["dy"] - noise["dy"], m["dth"]
 
     # 2. tombstone: short along the pad axis and one end of the footprint bare
     g, t = m.get("body_g"), m.get("body_t")
@@ -143,8 +176,8 @@ def judge_part(p: Part, m: dict, *, noise: dict, px_per_mm: float, stats: dict |
         #    the segmented body size of correctly placed parts varied 0.5x-2.7x on the
         #    fixture, so a fixed band would fail good boards. Colour class was worse.
         if stats and not single_golden:
-            za = _z(math.log(max(t["area"], 1.0) / max(g["area"], 1.0)), stats.get("log_area"))
-            zw = _z(math.log(max(t["short"], 1.0) / max(g["short"], 1.0)), stats.get("log_width"))
+            za = _z(math.log(max(t["area"], 1.0) / max(g["area"], 1.0)), stats.get("log_area"), LOG_AREA_SD)
+            zw = _z(math.log(max(t["short"], 1.0) / max(g["short"], 1.0)), stats.get("log_width"), LOG_WIDTH_SD)
             zz = max(abs(za), abs(zw))
             if zz > WRONG_PART_Z:
                 pr.calls.append(Call("wrong_part", "WRONG PART",
@@ -158,14 +191,25 @@ def judge_part(p: Part, m: dict, *, noise: dict, px_per_mm: float, stats: dict |
         if any(c.state == "REVERSED" for c in pr.calls):
             return pr
 
-    # 5. offset, net of the board-wide shift, against max(150 um, k sigma)
+    # 5. offset, net of the board-wide shift, against max(150 um, k sigma);
+    #    k sigma alone when the program has no scale
+    if not placed:
+        pr.calls.append(Call("offset", "UNINSPECTED",
+                             "placement not measured: no body edge to match round the part",
+                             measured_against="golden body"))
+        return pr
     lim = offset_limit_px(px_per_mm, noise["sigma"])
     off = math.hypot(pr.dx_px, pr.dy_px)
-    um = off / px_per_mm * 1000.0 if px_per_mm else float("nan")
-    if off > lim:
-        pr.calls.append(Call("offset", "OFFSET", f"{um:.0f} um off its lands (limit {lim / px_per_mm * 1000:.0f} um)",
+    if lim <= 0:
+        pr.calls.append(Call("offset", "UNINSPECTED",
+                             "no scale and too few parts to measure placement noise; offset not judged",
+                             measured_against="board placement noise"))
+    elif off > lim:
+        pr.calls.append(Call("offset", "OFFSET",
+                             f"{length_text(off, px_per_mm)} off its lands (limit {length_text(lim, px_per_mm)}"
+                             + ("" if px_per_mm > 0 else "; no scale") + ")",
                              _sigmoid((off - lim) / max(noise["sigma"], 1.0)), False,
-                             "board placement noise and 150 um"))
+                             "board placement noise and 150 um" if px_per_mm > 0 else "board placement noise"))
         return pr
 
     # 6. skew: silkscreen outline where there is one, else the golden body
@@ -188,11 +232,37 @@ def _quarter_turn(g: dict | None, t: dict | None) -> bool:
         return False
     if g["long"] / max(g["short"], 1) < 1.5 or t["long"] / max(t["short"], 1) < 1.5:
         return False                     # near-square bodies have no long axis to compare
+    # A turned part is the same part: its body keeps its size. A test body that
+    # reads much longer or shorter was segmented differently (a loose box took in
+    # lands or shadow), and its axis says nothing about a turn. Fixture: auto-box
+    # C5 and C8 read 90 deg with sizes 0.6-1.8x the golden's and were not turned.
+    for k in ("long", "short"):
+        if not 0.75 <= t[k] / max(g[k], 1) <= 1.33:
+            return False
     d = abs(((t["axis"] - g["axis"]) + 90.0) % 180.0 - 90.0)
     return d > 60.0
 
 
 def _polarity(p: Part, m: dict, single_golden: bool, stats: dict | None) -> list[Call]:
+    """Polarity calls for a part taught with polarized=True (nothing else is asked).
+
+    Which check runs is set by the part's type, nothing else:
+
+    * type diode, led or bridge: the band / bevel check (features.stripe_end).
+      A cathode band or bevel is a stripe dark across the whole body at one end;
+      the golden's stripe must be clear (|contrast| >= STRIPE_CLEAR) or the check
+      is UNINSPECTED, and a test stripe clearly at the other end is POLARITY
+      REVIEW (REVERSED once >= 3 goldens agree on the band).
+    * any other type (ic, sot23, regulator, resistor, capacitor, other): the
+      marking check. The test body's marking is compared with the golden's
+      as-is and turned 180 deg; matching the turned one better by more than
+      TURN_REVIEW is POLARITY REVIEW. It needs readable marking or asymmetric
+      leads, and a symmetric unmarked body is never called.
+
+    marked_end is not read by either check: the golden defines the right way
+    round, and marked_end is kept with the part for the operator and the report.
+    Parts with polarized=False (auto-named P1..Pn boxes default to this, type
+    other) get no polarity call at all."""
     calls = []
     if "stripe_g" in m:
         sg, st = m["stripe_g"], m["stripe_t"]
@@ -227,9 +297,10 @@ def board_verdict(result: BoardResult) -> None:
         reasons += [c.detail for c in result.board_calls]
     if fails:
         reasons.append(f"{len(fails)} part(s) failed: " + ", ".join(f"{p.refdes} {p.state}" for p in fails))
-    if reviews:
-        reasons.append(f"{len(reviews)} part(s) need review: " + ", ".join(f"{p.refdes} {p.state}" for p in reviews
-                                                                           if p not in fails))
+    review_only = [p for p in reviews if p not in fails]
+    if review_only:
+        reasons.append(f"{len(review_only)} part(s) need review: "
+                       + ", ".join(f"{p.refdes} {p.state}" for p in review_only))
     frac = len(wholly_uninspected) / max(len(result.parts), 1)
     if wholly_uninspected:
         reasons.append(f"{len(wholly_uninspected)} part(s) uninspected (golden too variable): "

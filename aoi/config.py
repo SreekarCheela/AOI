@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 # ---- optics (spec section 2) -------------------------------------------------
 UM_PER_PX: float = 12.0                 # sampling pitch at the board plane
@@ -333,7 +334,15 @@ PHOTO_MIN_GOLDENS: int = 3              # one golden gives no spread to learn fr
 # (iPhone, 4032x3024), which read 388; its three test photos read 288-383.
 PHOTO_MIN_SHARPNESS: float = 194.0
 PHOTO_WORK_SIDE: int = 1600             # long side of the copy used for global checks
-PHOTO_MIN_FILL: float = 0.60            # board area / frame area
+# Golden gate on how much board the photo has. Frame fill used to be 0.60, which
+# refused every phone golden in the repo (29-43% fill, board 2643-3233 px long,
+# sharpness 943-1235, five times the focus floor). What matters is pixels on
+# the board, not how much desk is round it, so fill is only a sanity floor
+# (is there a board at all) and the real requirement is the board's long side in
+# full-resolution pixels. Measured: phone goldens 2643-3233 px and the fixture
+# golden 3987 px pass; the Sony frames (board 465 px, parts 9-33 px) fail.
+PHOTO_MIN_FILL: float = 0.20            # board area / frame area
+PHOTO_MIN_BOARD_PX: int = 1500          # board long side, full-resolution px
 PHOTO_MIN_PART_PX: int = 40             # smallest taught part's long side
 PHOTO_SCALE_TOL: float = 0.15           # test vs golden area scale
 PHOTO_REL_SHARPNESS: float = 0.5        # test sharpness vs golden median
@@ -345,3 +354,33 @@ PHOTO_UNINSPECTED_FRAC: float = 0.10    # wholly uninspected parts before board 
 PHOTO_CALIBRATE_MIN_LABELS: int = 30    # operator labels before a score becomes P=
 PHOTO_CALIBRATE_MIN_PER_CLASS: int = 10
 PHOTO_TOMBSTONE_LENGTH: float = 0.70    # body length along pad axis vs golden
+# Whole-board difference (aoi/photo/diff.py). A difference blob that is not on
+# a taught part becomes an UNEXPECTED DIFFERENCE review: a part the detector
+# never boxed, a missing part with no box, debris. One on a part is left to that
+# part's own checks, which know what the part should look like. "On" means the
+# blob overlaps the part box grown by PAD x its long side (lands, leads and
+# fillets sit outside the body box; test3's shiny U1 tab and BD1 leads are the
+# false blobs this absorbs).
+PHOTO_DIFF: bool = True
+PHOTO_DIFF_PART_PAD: float = 0.5
+# Fraction of the blob inside one grown part box for that part to own it.
+# Fixture: blobs on a boxed part (true or false) sat 0.80-1.00 inside it; a
+# missing C7 taught without a box sat 0.47 inside its neighbour R12's.
+PHOTO_DIFF_ON_PART: float = 0.6
+PHOTO_DIFF_MAX_CALLS: int = 10          # strongest first; more than this is one board call
+# A blob where golden 1 is mostly bare tinned metal (traces, big pads) is two
+# boards' solder finish differing, not a part: no part can be missing from bare
+# metal. Fixture: every true blob had golden metal <= 0.37, the tinned-trace
+# false blobs on test3 0.70-0.99. Debris lying on a bare trace is not reported.
+PHOTO_DIFF_MAX_GOLDEN_METAL: float = 0.6
+
+
+# Where photo mode keeps its files by default: resolved against the repository,
+# not the working directory, so launching from another folder finds the same
+# programs, record and detector weights.
+REPO_ROOT: Path = Path(__file__).resolve().parents[1]
+PHOTO_PROGRAMS_DIR: Path = REPO_ROOT / "programs"
+PHOTO_RUNS_DIR: Path = REPO_ROOT / "out" / "photo_runs"
+PHOTO_DB: Path = REPO_ROOT / "out" / "photo_aoi.db"
+PHOTO_DETECTOR_WEIGHTS: Path = REPO_ROOT / "out" / "models" / "part_detector.pt"
+PHOTO_SHOOTS_DIR: Path = REPO_ROOT / "photos"

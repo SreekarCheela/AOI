@@ -24,9 +24,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .. import config
+
 BOARD_PX = 2048                 # board long side after normalisation
 STRIDE = 4
-DEFAULT_WEIGHTS = Path(os.environ.get("AOI_PART_DETECTOR", "out/models/part_detector.pt"))
+DEFAULT_WEIGHTS = Path(os.environ.get("AOI_PART_DETECTOR") or config.PHOTO_DETECTOR_WEIGHTS)
 SCORE_MIN = 0.30
 NMS_IOU = 0.4
 MEAN = np.array([0.45, 0.45, 0.45], np.float32)

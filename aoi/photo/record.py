@@ -33,9 +33,11 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .model import BoardResult, Call
+from .. import config
+from .model import DIFF_TYPE, BoardResult, Call
+from .report import found_at
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # One script per version, applied in order. Never edit a shipped entry: a file
 # already at that version will not run it again, so the change reaches only new
@@ -114,6 +116,15 @@ CREATE INDEX adjudications_call ON adjudications(call_id);
     2: """
 ALTER TABLE runs ADD COLUMN annotated TEXT;
 ALTER TABLE runs ADD COLUMN html TEXT;
+""",
+    # Where each part was found, in aligned golden-1 pixels, so Review can box a
+    # run from an earlier session (and a DIFF part, which is in no program)
+    # without the result object. NULL on rows recorded before this version.
+    3: """
+ALTER TABLE part_results ADD COLUMN x REAL;
+ALTER TABLE part_results ADD COLUMN y REAL;
+ALTER TABLE part_results ADD COLUMN w REAL;
+ALTER TABLE part_results ADD COLUMN h REAL;
 """
 }
 
@@ -143,7 +154,7 @@ def _now() -> str:
 class Record:
     """Photo mode's local record. One SQLite file, no network."""
 
-    def __init__(self, path: str | Path = "out/photo_aoi.db") -> None:
+    def __init__(self, path: str | Path = config.PHOTO_DB) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path)
@@ -256,9 +267,12 @@ class Record:
             run_id = int(cur.lastrowid)
             for pr in result.parts:
                 p = pr.part
+                fx, fy = found_at(pr, result)
                 cur = self.db.execute(
-                    "INSERT INTO part_results (run_id, refdes, type, package, state)"
-                    " VALUES (?,?,?,?,?)", (run_id, p.refdes, p.type, p.package, pr.state))
+                    "INSERT INTO part_results (run_id, refdes, type, package, state, x, y, w, h)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (run_id, p.refdes, p.type, p.package, pr.state, float(fx), float(fy),
+                     float(p.w), float(p.h)))
                 prid = int(cur.lastrowid)
                 for c in pr.calls:
                     self._insert_call(run_id, prid, p.refdes, c)
@@ -329,12 +343,22 @@ class Record:
         return True
 
     def supersede(self, run_id: int, new_run_id: int) -> None:
-        """Point a run at the reshoot that replaces it. Both must exist."""
+        """Point a run at the reshoot that replaces it. Both must exist, and the
+        new run must not already lead back to this one: a cycle would leave every
+        run in it SUPERSEDED and the board with no record at all."""
         if int(run_id) == int(new_run_id):
             raise ValueError("a run cannot supersede itself")
         for rid in (run_id, new_run_id):
             if self.db.execute("SELECT 1 FROM runs WHERE id = ?", (int(rid),)).fetchone() is None:
                 raise KeyError(f"no run {rid}")
+        seen, cur = set(), int(new_run_id)
+        while cur is not None and cur not in seen:
+            if cur == int(run_id):
+                raise ValueError(f"run {new_run_id} is already superseded, directly or through "
+                                 f"later reshoots, by run {run_id}; superseding back would make a cycle")
+            seen.add(cur)
+            row = self.db.execute("SELECT superseded_by FROM runs WHERE id = ?", (cur,)).fetchone()
+            cur = None if row is None or row["superseded_by"] is None else int(row["superseded_by"])
         self.db.execute("UPDATE runs SET superseded_by = ? WHERE id = ?",
                         (int(new_run_id), int(run_id)))
         self.db.commit()
@@ -343,7 +367,9 @@ class Record:
     def calls(self, run_id: int) -> list[dict]:
         """Every call on a run, part-level first, each with its current answer."""
         rows = self.db.execute(
-            f"SELECT c.*, l.key FROM calls c LEFT JOIN ({_LATEST}) l ON l.call_id = c.id"
+            f"SELECT c.*, l.key, p.x, p.y, p.w, p.h, p.type AS part_type FROM calls c"
+            f" LEFT JOIN ({_LATEST}) l ON l.call_id = c.id"
+            " LEFT JOIN part_results p ON p.id = c.part_result_id"
             " WHERE c.run_id = ? ORDER BY c.part_result_id IS NULL, c.id",
             (int(run_id),)).fetchall()
         return [{
@@ -357,6 +383,9 @@ class Record:
             "detail": r["detail"],
             "board_level": r["part_result_id"] is None,
             "adjudication": r["key"],
+            # where the part was found (aligned golden-1 px); None before schema 3
+            "box": (None if r["x"] is None else (r["x"], r["y"], r["w"], r["h"])),
+            "part_type": r["part_type"],
         } for r in rows]
 
     def operator_status(self, run_id: int) -> str:
@@ -368,9 +397,11 @@ class Record:
         reshoot. A reshoot is resolved by superseding the run, after which the
         run's status is SUPERSEDED whatever was keyed on it: the new photo is
         the board's record now. INFO and OK calls need no answer, so a run with
-        no FAIL or REVIEW call is PASS.
+        no FAIL or REVIEW call has nothing for the operator to change and keeps
+        the machine verdict: PASS, or REVIEW when the machine said REVIEW for a
+        reason that is not a call (too many parts uninspected).
         """
-        run = self.db.execute("SELECT superseded_by FROM runs WHERE id = ?",
+        run = self.db.execute("SELECT superseded_by, machine_verdict FROM runs WHERE id = ?",
                               (int(run_id),)).fetchone()
         if run is None:
             raise KeyError(f"no run {run_id}")
@@ -378,6 +409,8 @@ class Record:
             return "SUPERSEDED"
         keys = [c["adjudication"] for c in self.calls(run_id)
                 if c["severity"] in NEEDS_ANSWER]
+        if not keys:
+            return run["machine_verdict"]
         if "D" in keys:
             return "FAIL"
         if all(k == "F" for k in keys):
@@ -390,8 +423,11 @@ class Record:
         The false-call numerator is FAIL calls the operator answered F. A REVIEW
         answered F is the machine asking and being told "fine", which is what a
         REVIEW is for; it is counted as `review_resolved_ok`, not as a false
-        call. The denominator is parts actually inspected: a NOT CHECKED or
-        UNINSPECTED part was never judged, so it cannot have been misjudged.
+        call. The denominator is parts actually judged for presence: a part with
+        a NOT CHECKED call (outside the photo, glare) or an UNINSPECTED missing
+        check was never judged, so it cannot have been misjudged. A part whose
+        headline is UNINSPECTED for another reason (a polarity band too faint to
+        read) was still judged present or missing, and counts.
 
         There is no escape count. A defect the machine passed never reaches the
         operator, so this file cannot see it; only a hand-inspected sample can.
@@ -421,7 +457,11 @@ class Record:
         out: dict[str, dict] = {}
         for r in self.db.execute(
                 f"SELECT {group_expr} AS g,"
-                f" SUM(p.state NOT IN ({', '.join(repr(s) for s in NOT_INSPECTED)}))"
+                # an UNEXPECTED DIFFERENCE carrier is not a part that was inspected
+                f" SUM(p.type != '{DIFF_TYPE}' AND NOT EXISTS (SELECT 1 FROM calls x"
+                f" WHERE x.part_result_id = p.id"
+                f" AND (x.state = 'NOT CHECKED'"
+                f" OR (x.check_name = 'missing' AND x.state = 'UNINSPECTED'))))"
                 f" AS inspected,"
                 f" COUNT(DISTINCT p.run_id) AS boards"
                 f" FROM part_results p JOIN runs r ON r.id = p.run_id"

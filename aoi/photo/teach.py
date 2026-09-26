@@ -13,6 +13,7 @@ be, so each part's score spread over good shots is known.
 from __future__ import annotations
 
 import math
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -127,11 +128,14 @@ def self_check(golden_bgr: np.ndarray, parts: list[Part]) -> tuple[list[tuple[st
 
     Skew uses the outline's straight segments (mod 90). A quarter turn needs the
     part's own outline rectangle; where the outline is shared or open the part is
-    listed as not checkable rather than passed."""
+    listed as not checkable rather than passed.
+
+    Reads only what it needs (features.golden_outline): no alignment, presence
+    or placement, which made a board with nothing checkable cost ~8 s."""
     ref = F.Frame.of(golden_bgr)
     flags, unchecked = [], []
     for p in parts:
-        m = F.measure(ref, ref, p, is_golden=True)
+        m = F.golden_outline(ref, p)
         sk = m.get("skew_silk", float("nan"))
         if not math.isnan(sk) and m.get("silk_len", 0) >= 150 and abs(sk) > config.MAX_SKEW_DEG:
             flags.append((p.refdes, f"{sk:+.1f} deg against its silkscreen outline"))
@@ -149,6 +153,15 @@ def self_check(golden_bgr: np.ndarray, parts: list[Part]) -> tuple[list[tuple[st
 
 # -------------------------------------------------------------- scale
 def scale_from(golden_bgr: np.ndarray, px_per_mm: float | None, board_width_mm: float | None) -> float:
+    """px per mm, or 0.0 when no scale is given.
+
+    Scale is optional: without it every offset is judged against the board's
+    own placement noise (k sigma) and reported in px, and the program is stamped
+    "no scale: offsets in px". Presence, polarity and skew do not need it."""
+    if px_per_mm is not None and px_per_mm <= 0:
+        raise PhotoError(f"px/mm must be positive, not {px_per_mm}")
+    if board_width_mm is not None and board_width_mm <= 0:
+        raise PhotoError(f"board width must be positive, not {board_width_mm} mm")
     if px_per_mm:
         return float(px_per_mm)
     if board_width_mm:
@@ -156,29 +169,62 @@ def scale_from(golden_bgr: np.ndarray, px_per_mm: float | None, board_width_mm: 
         if w <= 0:
             raise PhotoError("could not find the board outline to measure its width; give --px-per-mm")
         return w / float(board_width_mm)
-    raise PhotoError("the program needs a scale: give px/mm or the board's long side in mm")
+    return 0.0
+
+
+# -------------------------------------------------------- duplicate goldens
+# Median grey-level residual (after a gain/offset fit) between golden 1 and
+# another golden aligned onto it, on a 1000 px copy. Measured: the same file,
+# a re-encoded copy and a warped + brightened copy of the fixture golden read
+# 0.00-0.42; burst shots of the same unmoved board 1.14-2.10; re-framed shots
+# of the same board 3.5-4.5; a different board 7.9.
+DUPLICATE_RESIDUAL = 0.75
+
+
+def shot_residual(golden1: np.ndarray, other: np.ndarray, H: np.ndarray) -> float:
+    w, c = register.warp_to_ref(other, H, golden1.shape)
+    s = 1000 / max(golden1.shape[:2])
+    ga = cv2.resize(grey(golden1), None, fx=s, fy=s, interpolation=cv2.INTER_AREA).astype(np.float32)
+    gb = cv2.resize(grey(w), None, fx=s, fy=s, interpolation=cv2.INTER_AREA).astype(np.float32)
+    cm = cv2.erode((cv2.resize(c, (ga.shape[1], ga.shape[0]), interpolation=cv2.INTER_NEAREST) == 255)
+                   .astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    if cm.sum() < 100:
+        return float("inf")
+    x, y = ga[cm], gb[cm]
+    k, b = np.polyfit(y, x, 1)
+    return float(np.median(np.abs(x - (k * y + b))))
 
 
 # ---------------------------------------------------------- golden stats
-def golden_stats(goldens: list[np.ndarray], parts: list[Part]) -> dict:
+def golden_stats(goldens: list[np.ndarray], parts: list[Part],
+                 registrations: dict[int, np.ndarray] | None = None) -> dict:
     """Per part, the spread of every judged score over the golden shots.
 
-    Golden 1 measured against itself is one sample; each further golden, aligned
-    onto golden 1 and measured as a test photo, is another."""
+    Each golden after the first, aligned onto golden 1 and measured as a test
+    photo, is one sample. Golden 1 against itself is not: it reads a perfect
+    match by construction (phys and gap ratio 1, zero size change), and counting
+    it pulled every mean toward "perfect" and shrank every spread. With three
+    goldens that leaves two samples, so the judge floors each spread
+    (judge.missing_cut, LOG_AREA_SD, LOG_WIDTH_SD) rather than trust it alone.
+    For the band, golden 1's own stripe is a real reading and is counted.
+
+    `registrations` (golden index -> homography onto golden 1) skips aligning
+    again when build_program already did."""
     ref = F.Frame.of(goldens[0])
     samples: dict[str, dict[str, list[float]]] = {
         p.refdes: {"missing_logit": [], "stripe": [], "log_area": [], "log_width": []} for p in parts}
-    for i, g in enumerate(goldens):
-        if i == 0:
-            img, golden_self = ref, True
-        else:
+    g1_stripe: dict[str, float] = {}
+    for i, g in enumerate(goldens[1:], start=1):
+        H = (registrations or {}).get(i)
+        if H is None:
             reg = register.register(grey(goldens[0]), grey(g))
             if not reg.ok:
                 raise PhotoError(f"golden {i + 1} does not align onto golden 1: {reg.note}")
-            w, c = register.warp_to_ref(g, reg.H, goldens[0].shape)
-            img, golden_self = F.Frame.of(w, c), False
+            H = reg.H
+        w, c = register.warp_to_ref(g, H, goldens[0].shape)
+        img = F.Frame.of(w, c)
         for p in parts:
-            m = F.measure(ref, img, p, is_golden=golden_self)
+            m = F.measure(ref, img, p)
             if not m.get("in_view"):
                 continue
             samples[p.refdes]["missing_logit"].append(missing_logit(m))
@@ -187,15 +233,16 @@ def golden_stats(goldens: list[np.ndarray], parts: list[Part]) -> dict:
                 samples[p.refdes]["log_area"].append(math.log(max(t["area"], 1.0) / max(g["area"], 1.0)))
                 samples[p.refdes]["log_width"].append(math.log(max(t["short"], 1.0) / max(g["short"], 1.0)))
             if "stripe_t" in m:
+                g1_stripe[p.refdes] = m["stripe_g"]
                 samples[p.refdes]["stripe"].append(m["stripe_t"])
     stats = {}
     for r, d in samples.items():
         s: dict = {}
         for key in ("missing_logit", "log_area", "log_width"):
             v = d[key]
-            if len(v) >= 2:
-                s[key] = (float(np.mean(v)), float(np.std(v, ddof=1)), len(v))
-        st = d["stripe"]
+            if v:
+                s[key] = (float(np.mean(v)), float(np.std(v, ddof=1)) if len(v) >= 2 else 0.0, len(v))
+        st = ([g1_stripe[r]] if r in g1_stripe else []) + d["stripe"]
         if st:
             clear_same = all(abs(v) >= 1.5 and np.sign(v) == np.sign(st[0]) for v in st)
             s["stripe_consistent"] = (1.0 if clear_same and len(st) >= 3 else 0.0, 0.0, len(st))
@@ -214,7 +261,7 @@ class TeachReport:
 
 def build_program(name: str, golden_paths: list[str | Path], parts: list[Part], *,
                   px_per_mm: float | None = None, board_width_mm: float | None = None,
-                  root: str | Path = "programs", single_golden: bool = False,
+                  root: str | Path = config.PHOTO_PROGRAMS_DIR, single_golden: bool = False,
                   accept_selfcheck: list[str] | str = ()) -> TeachReport:
     golden_paths = [Path(p) for p in golden_paths]
     check_golden_count(len(golden_paths), single_golden)
@@ -225,10 +272,20 @@ def build_program(name: str, golden_paths: list[str | Path], parts: list[Part], 
     bad = {k: v for k, v in problems.items() if v}
     if bad:
         raise PhotoError("golden photo(s) rejected: " + "; ".join(f"{k}: {', '.join(v)}" for k, v in bad.items()))
-    for p, g in zip(golden_paths[1:], goldens[1:]):
+    regs: dict[int, np.ndarray] = {}
+    for i, (p, g) in enumerate(zip(golden_paths[1:], goldens[1:]), start=1):
         reg = register.register(grey(goldens[0]), grey(g))
         if not reg.ok:
             raise PhotoError(f"{p.name} does not align onto {golden_paths[0].name}: {reg.note}")
+        regs[i] = reg.H
+    for i, H in regs.items():
+        # the same shot twice measures no spread at all; the golden statistics
+        # would then be one board's noise, not how good boards vary
+        for j in [0] + [k for k in regs if k < i]:
+            Hij = H if j == 0 else np.linalg.inv(regs[j]) @ H
+            if shot_residual(goldens[j], goldens[i], Hij) < DUPLICATE_RESIDUAL:
+                raise PhotoError(f"golden {i + 1} is the same shot as golden {j + 1}; "
+                                 "shoot a different good board or re-seat it")
     ppm = scale_from(goldens[0], px_per_mm, board_width_mm)
     small = min(parts, key=lambda q: max(q.w, q.h))
     if max(small.w, small.h) < config.PHOTO_MIN_PART_PX:
@@ -246,11 +303,18 @@ def build_program(name: str, golden_paths: list[str | Path], parts: list[Part], 
     if pending:
         raise SelfCheckError(pending)
 
-    stats = {} if single_golden else golden_stats(goldens, parts)
+    stats = {} if single_golden else golden_stats(goldens, parts, regs)
     folder, version = new_version_folder(root, name)
-    prog = Program(name=name, version=version, px_per_mm=ppm, parts=parts,
-                   goldens=copy_goldens(golden_paths, folder), single_golden=single_golden,
-                   accepted_selfcheck=[r for r, _ in flags], golden_stats=stats, created=now(),
-                   folder=str(folder))
-    prog.save()
+    try:
+        prog = Program(name=name, version=version, px_per_mm=ppm, parts=parts,
+                       goldens=copy_goldens(golden_paths, folder), single_golden=single_golden,
+                       accepted_selfcheck=[r for r, _ in flags], golden_stats=stats, created=now(),
+                       folder=str(folder))
+        prog.save()
+        if config.PHOTO_DIFF and len(goldens) >= 2:
+            from . import diff
+            np.save(prog.spread_path, diff.spread_map(goldens))
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)     # never leave a half-written version behind
+        raise
     return TeachReport(prog, problems, flags, unchecked)

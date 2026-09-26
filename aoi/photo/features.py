@@ -32,10 +32,15 @@ import cv2
 import numpy as np
 
 from .. import config
+from .io import PhotoError
 from .model import Part
 
 PAD = 400
 SEARCH = 24                     # local re-registration search, px
+# The window margin round a part is 0.9x its long side, capped so the window plus
+# the local search stays inside the PAD border added to every frame.
+MAX_MARGIN = PAD - SEARCH - 8
+MIN_RING_COVER = 0.5            # share of the ring that must be real photo, not border
 W_LAB = np.array([0.5, 1.0, 1.0], np.float32)   # L down-weighted: exposure moves it most
 
 
@@ -61,7 +66,11 @@ class Geo:
 
     def __init__(self, p: Part):
         self.p = p
-        self.m = int(max(35, 0.9 * max(p.w, p.h)))
+        self.m = min(int(max(35, 0.9 * max(p.w, p.h))), MAX_MARGIN)
+        if int(0.6 * min(p.w, p.h)) + 4 >= self.m or max(p.w, p.h) > 2 * PAD + 400:
+            raise PhotoError(f"{p.refdes}: box {p.w}x{p.h} px is too large to measure "
+                             f"(sides up to about {int((MAX_MARGIN - 4) / 0.6)} px); "
+                             "shoot from further away or box a smaller part")
         self.x0, self.y0 = p.x + PAD - self.m, p.y + PAD - self.m
         self.W, self.H = p.w + 2 * self.m, p.h + 2 * self.m
         self.bx = self.by = self.m                     # body box origin in the window
@@ -72,6 +81,10 @@ class Geo:
         self.core = (slice(self.by + int(ly * p.h), self.by + p.h - int(ly * p.h)),
                      slice(self.bx + int(lx * p.w), self.bx + p.w - int(lx * p.w)))
         self.body = (slice(self.by, self.by + p.h), slice(self.bx, self.bx + p.w))
+        # the body and the board just round it: what place() and the gap
+        # contrast read, so it has to be real photo, never replicated border
+        c = min(self.m, int(0.35 * min(p.w, p.h)) + 4)
+        self.near = (slice(self.by - c, self.by + p.h + c), slice(self.bx - c, self.bx + p.w + c))
 
     def cut(self, img: np.ndarray, dx: float = 0.0, dy: float = 0.0, extra: int = 0) -> np.ndarray:
         if dx == 0 and dy == 0:
@@ -124,11 +137,11 @@ def _grad(g: np.ndarray) -> np.ndarray:
 
 
 # ------------------------------------------------------------ alignment
-def local_shift(geo: Geo, ref: Frame, img: Frame) -> tuple[float, float, float]:
+def local_shift(geo: Geo, ref: Frame, img: Frame, ring: np.ndarray | None = None) -> tuple[float, float, float]:
     """Residual shift of the board round the part (body masked out), and match quality."""
     tpl = _grad(geo.cut(ref.grey))
     big = _grad(geo.cut(img.grey, extra=SEARCH))
-    res = cv2.matchTemplate(big, tpl, cv2.TM_CCOEFF_NORMED, mask=geo.ring)
+    res = cv2.matchTemplate(big, tpl, cv2.TM_CCOEFF_NORMED, mask=geo.ring if ring is None else ring)
     res = np.nan_to_num(res, nan=-1.0, posinf=-1.0, neginf=-1.0)
     _, v, _, loc = cv2.minMaxLoc(res)
     sx, sy = subpixel(res, loc)
@@ -155,8 +168,8 @@ class Classes:
     A placed part covers its footprint centre with something that is neither.
     Thresholds come from this part's own golden ring."""
 
-    def __init__(self, geo: Geo, g_lab: np.ndarray):
-        r = g_lab[geo.ring > 0].reshape(-1, 3)
+    def __init__(self, geo: Geo, g_lab: np.ndarray, ring: np.ndarray | None = None):
+        r = g_lab[(geo.ring if ring is None else ring) > 0].reshape(-1, 3)
         sm = r[:, 1][r[:, 1] < 124]
         self.a_sm = float(np.median(sm)) if len(sm) > 50 else 112.0
         self.a_thr = 0.5 * (self.a_sm + 128.0)
@@ -205,19 +218,54 @@ def _orient(g: np.ndarray, geo: Geo) -> float:
     return float(across.sum() / (across.sum() + along.sum() + 1e-6))
 
 
+_W2 = W_LAB ** 2
+DE_EXHAUSTIVE = 49              # shift grids up to 7x7 are searched exhaustively
+DE_KEEP = 3                     # coarse candidates refined at full resolution
+
+
+def _dE_at(g: np.ndarray, t: np.ndarray, geo: Geo, ox: int, oy: int, step: int = 1) -> float:
+    p = geo.p
+    d = (t[geo.by + oy:geo.by + oy + p.h:step, geo.bx + ox:geo.bx + ox + p.w:step]
+         - g[geo.by:geo.by + p.h:step, geo.bx:geo.bx + p.w:step])
+    return float(np.median(np.sqrt((d * d * _W2).sum(-1))))
+
+
 def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo) -> float:
-    """Median colour change over the body box, at the best small integer shift."""
+    """Median colour change over the body box, at the best small integer shift.
+
+    Coarse to fine: every second shift on every second pixel first, then the
+    best few candidates' full 3x3 neighbourhoods at full resolution, climbing
+    until no neighbour is better. Every integer shift is within one step of a
+    coarse one, and the blurred colour change is smooth in the shift, so this
+    lands on the exhaustive minimum (checked on the 2026-09-25 fixture) at about
+    a tenth of the cost. Small grids are still searched exhaustively."""
     p = geo.p
     g = cv2.GaussianBlur(gl, (0, 0), 1.5); t = cv2.GaussianBlur(tl, (0, 0), 1.5)
     s = max(2, int(0.08 * max(p.w, p.h)))
-    gb = g[geo.body]
-    best = np.inf
-    for oy in range(-s, s + 1):
-        for ox in range(-s, s + 1):
-            tb = t[geo.by + oy:geo.by + oy + p.h, geo.bx + ox:geo.bx + ox + p.w]
-            v = float(np.median(np.sqrt((((tb - gb) * W_LAB) ** 2).sum(-1))))
-            best = min(best, v)
-    return best
+    if (2 * s + 1) ** 2 <= DE_EXHAUSTIVE:
+        return min(_dE_at(g, t, geo, ox, oy) for oy in range(-s, s + 1) for ox in range(-s, s + 1))
+    grid = sorted(set(range(-s, s + 1, 2)) | {s})
+    coarse = sorted((_dE_at(g, t, geo, ox, oy, 2), ox, oy) for oy in grid for ox in grid)
+    seen: dict[tuple[int, int], float] = {}
+
+    def exact(ox: int, oy: int) -> float:
+        if (ox, oy) not in seen:
+            seen[(ox, oy)] = _dE_at(g, t, geo, ox, oy)
+        return seen[(ox, oy)]
+
+    def around(ox: int, oy: int) -> None:
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if abs(ox + dx) <= s and abs(oy + dy) <= s:
+                    exact(ox + dx, oy + dy)
+
+    for _, ox, oy in coarse[:DE_KEEP]:
+        around(ox, oy)
+    while True:                              # climb from the best exact shift
+        (bx, by), best = min(seen.items(), key=lambda kv: kv[1])
+        around(bx, by)
+        if min(seen.values()) >= best:
+            return best
 
 
 def _gap_contrast(l: np.ndarray, geo: Geo) -> float:
@@ -245,8 +293,15 @@ def _gap_contrast(l: np.ndarray, geo: Geo) -> float:
 
 
 # --------------------------------------------------------------- placement
+FLAT_PTP = 0.05                 # a body map with less range than this has no edge to match
+
+
 def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tuple[float, float, float]:
-    """Shift and turn carrying the golden body map onto the test one."""
+    """Shift and turn carrying the golden body map onto the test one.
+
+    NaN for all three when either map is flat round the part (all body or no
+    body at all): there is no edge to match, and the minimum of a flat
+    difference is wherever the search happened to start, not a placement."""
     p = geo.p
     sig = max(1.0, 0.06 * min(p.w, p.h))
     g = cv2.GaussianBlur(Bg, (0, 0), sig); t = cv2.GaussianBlur(Bt, (0, 0), sig)
@@ -257,6 +312,8 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tu
     ty0, ty1 = max(0, y0 - s), min(t.shape[0], y1 + s)
     tx0, tx1 = max(0, x0 - s), min(t.shape[1], x1 + s)
     tw = t[ty0:ty1, tx0:tx1]
+    if float(np.ptp(g[y0:y1, x0:x1])) < FLAT_PTP or float(np.ptp(tw)) < FLAT_PTP:
+        return float("nan"), float("nan"), float("nan")
 
     def at(a: float):
         R = cv2.getRotationMatrix2D((cx, cy), a, 1.0)
@@ -370,7 +427,10 @@ def outline_axis(thin: np.ndarray, geo: Geo) -> float | None:
 def patch_in_golden_frame(win: np.ndarray, geo: Geo, dx: float, dy: float, dth: float, inset: float = 0.08) -> np.ndarray:
     """Test body resampled into the golden body box, undoing the measured offset and turn."""
     p = geo.p
-    R = cv2.getRotationMatrix2D((geo.bx + p.w / 2.0, geo.by + p.h / 2.0), -dth, 1.0)
+    # place() found that the golden body turned by +dth (cv2 convention) and
+    # shifted by (dx, dy) lies on the test body; that same forward map, used as
+    # the inverse map of the warp, samples the test body back into the golden box.
+    R = cv2.getRotationMatrix2D((geo.bx + p.w / 2.0, geo.by + p.h / 2.0), dth, 1.0)
     R[0, 2] += dx; R[1, 2] += dy
     full = cv2.warpAffine(win, R, (geo.W, geo.H), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                           borderMode=cv2.BORDER_REPLICATE)
@@ -385,6 +445,9 @@ def highpass(patch: np.ndarray, p: Part) -> np.ndarray:
     h, w = a.shape
     m = 0.12
     return a[int(m * h):h - int(m * h), int(m * w):w - int(m * w)]
+
+
+STRIPE_TYPES = ("diode", "led", "bridge")     # polarity read from a band / bevel
 
 
 def stripe_end(hp: np.ndarray, p: Part) -> float:
@@ -411,23 +474,80 @@ def turn_margin(hp_t: np.ndarray, hp_g: np.ndarray) -> float:
 
 
 # ------------------------------------------------------------------- one part
+def coverage(geo: Geo, ref: Frame, img: Frame) -> tuple[bool, np.ndarray, str]:
+    """(in view, usable ring, why not).
+
+    In view needs the body and the board just round it (`Geo.near`) to be real
+    photo in both golden and test, and at least MIN_RING_COVER of the ring. The
+    ring returned leaves out every pixel that is replicated border in the golden,
+    or in the test anywhere within the local search: aligning or levelling on
+    copied edge pixels is how a part at the photo edge got a false OFFSET."""
+    gc, tc = geo.cut(ref.cover), geo.cut(img.cover)
+    if gc[geo.near].min() == 0 or tc[geo.near].min() == 0:
+        return False, geo.ring, "outside this photo"
+    if gc.min() > 0 and tc.min() > 0 and geo.cut(img.cover, extra=SEARCH).min() > 0:
+        return True, geo.ring, ""
+    k = 2 * SEARCH + 1
+    tce = cv2.erode(geo.cut(img.cover, extra=SEARCH), np.ones((k, k), np.uint8),
+                    borderType=cv2.BORDER_CONSTANT, borderValue=0)[SEARCH:-SEARCH, SEARCH:-SEARCH]
+    ring = geo.ring * ((gc > 0) & (tce > 0)).astype(np.float32)
+    if ring.sum() < MIN_RING_COVER * geo.ring.sum():
+        return False, ring, "too close to the photo edge to align"
+    return True, ring, ""
+
+
+def _cut_float(geo: Geo, img: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """geo.cut(img.astype(float32), dx, dy) without converting the whole frame:
+    the same bilinear samples, read from an integer crop wide enough for the shift."""
+    e = int(np.ceil(max(abs(dx), abs(dy)))) + 2
+    y0, x0 = geo.y0 - e, geo.x0 - e
+    if y0 < 0 or x0 < 0 or y0 + geo.H + 2 * e > img.shape[0] or x0 + geo.W + 2 * e > img.shape[1]:
+        return geo.cut(img.astype(np.float32), dx, dy)
+    crop = img[y0:y0 + geo.H + 2 * e, x0:x0 + geo.W + 2 * e].astype(np.float32)
+    M = np.float32([[1, 0, -(e + dx)], [0, 1, -(e + dy)]])
+    return cv2.warpAffine(crop, M, (geo.W, geo.H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+
+def golden_outline(ref: Frame, p: Part) -> dict:
+    """What the golden self-check reads, and nothing else: skew of the body
+    against the silkscreen, and the outline and body long axes. A fraction of
+    `measure`'s cost, since it skips alignment, presence and placement."""
+    geo = Geo(p)
+    ok, ring, _ = coverage(geo, ref, ref)
+    if not ok:
+        return {"in_view": False}
+    gl = lab(geo.cut(ref.bgr).astype(np.float32))
+    cls = Classes(geo, gl, ring)
+    Bg = cls.body_map(gl)
+    thin = silk_mask(gl, geo, cls)
+    sa, slen = silk_angle(thin, geo)
+    ba, _ = body_angle(Bg, geo)
+    rg = body_rect(Bg, geo)
+    return dict(in_view=True, silk_len=slen,
+                skew_silk=float(wrap(ba - sa, 90.0)) if not np.isnan(sa) and not np.isnan(ba) else float("nan"),
+                outline_axis=outline_axis(thin, geo), body_axis=rg["axis"] if rg else None, body_g=rg)
+
+
 def measure(ref: Frame, img: Frame, p: Part, *, is_golden: bool = False) -> dict:
-    """Every raw number the judge needs for part `p`, test `img` against golden `ref`."""
+    """Every raw number the judge needs for part `p`, test `img` against golden `ref`.
+
+    dx, dy, dth are NaN when the body maps give nothing to match (see place)."""
     geo = Geo(p)
     out: dict = {}
-    if geo.cut(img.cover)[geo.body].min() == 0:
-        out["in_view"] = False
+    ok, ring, why = coverage(geo, ref, img)
+    if not ok:
+        out.update(in_view=False, view_note=why)
         return out
     out["in_view"] = True
-    sx, sy, q = (0.0, 0.0, 1.0) if is_golden else local_shift(geo, ref, img)
+    sx, sy, q = (0.0, 0.0, 1.0) if is_golden else local_shift(geo, ref, img, ring)
     out.update(local_dx=sx, local_dy=sy, local_q=q)
 
     g_win = geo.cut(ref.bgr).astype(np.float32)
-    t_raw = geo.cut(img.bgr.astype(np.float32), sx, sy)
+    t_raw = _cut_float(geo, img.bgr, sx, sy)
     out["glare"] = float((t_raw[geo.body].max(-1) >= config.PHOTO_GLARE_LEVEL).mean())
-    t_win = t_raw if is_golden else normalise(t_raw, g_win, geo.ring)
+    t_win = t_raw if is_golden else normalise(t_raw, g_win, ring)
     gl, tl = lab(g_win), lab(t_win)
-    cls = Classes(geo, gl)
+    cls = Classes(geo, gl, ring)
     Bg, Bt = cls.body_map(gl), cls.body_map(tl)
 
     # presence
@@ -458,11 +578,13 @@ def measure(ref: Frame, img: Frame, p: Part, *, is_golden: bool = False) -> dict
         out["outline_axis"] = outline_axis(silk_mask(gl, geo, cls), geo)
         out["body_axis"] = rg["axis"] if rg else None
 
-    # marking and polarity, test body resampled into the golden frame
+    # marking and polarity, test body resampled into the golden frame (in place
+    # when the placement could not be measured)
+    placed = not np.isnan(dx)
     hp_g = highpass(patch_in_golden_frame(g_grey, geo, 0, 0, 0), p)
-    hp_t = highpass(patch_in_golden_frame(t_grey, geo, dx, dy, dth), p)
+    hp_t = highpass(patch_in_golden_frame(t_grey, geo, *((dx, dy, dth) if placed else (0.0, 0.0, 0.0))), p)
     out.update(mark_s0=ncc(hp_t, hp_g), mark_s180=ncc(hp_t, np.rot90(hp_g, 2)),
                turn_margin=turn_margin(hp_t, hp_g))
-    if p.polarized and p.type in ("diode", "led", "bridge"):
+    if p.polarized and p.type in STRIPE_TYPES:
         out.update(stripe_g=stripe_end(hp_g, p), stripe_t=stripe_end(hp_t, p))
     return out

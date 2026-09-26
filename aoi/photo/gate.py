@@ -2,7 +2,7 @@
 
 Two stages, because part boxes and scale exist only after teach:
 
-    golden upload   focus, board fills the frame, registers onto golden 1
+    golden upload   focus, a board in the frame with enough pixels on it, registers onto golden 1
     test photo      focus against the goldens, same scale as the goldens
                     (per-part glare is judged per part, in judge.py)
 """
@@ -73,7 +73,12 @@ def golden_problems(bgr: np.ndarray) -> list[str]:
                    "hold still, tap to focus on the board")
     fill = board_fill(bgr)
     if fill < config.PHOTO_MIN_FILL:
-        out.append(f"board fills {fill:.0%} of the frame (need {config.PHOTO_MIN_FILL:.0%}); move closer")
+        out.append(f"board fills {fill:.0%} of the frame (need {config.PHOTO_MIN_FILL:.0%}); "
+                   "is the board in the photo? move closer")
+    side = board_width_px(bgr)
+    if side and side < config.PHOTO_MIN_BOARD_PX:
+        out.append(f"board is only {side:.0f} px long (need {config.PHOTO_MIN_BOARD_PX}); "
+                   "move closer or use a higher resolution camera")
     return out
 
 
@@ -83,6 +88,6 @@ def test_problems(bgr: np.ndarray, golden_sharpness: float, area_scale: float) -
     if golden_sharpness and sh < config.PHOTO_REL_SHARPNESS * golden_sharpness:
         out.append(f"blurrier than the goldens (sharpness {sh:.0f} vs {golden_sharpness:.0f}); reshoot")
     if area_scale and abs(area_scale - 1.0) > config.PHOTO_SCALE_TOL:
-        out.append(f"shot from a different distance (scale {area_scale:.2f}x the goldens, "
-                   f"allowed ±{config.PHOTO_SCALE_TOL:.0%}); match the golden distance")
+        out.append(f"shot from a different distance or resolution (scale {area_scale:.2f}x the goldens, "
+                   f"allowed ±{config.PHOTO_SCALE_TOL:.0%}); match the golden distance and camera resolution")
     return out
