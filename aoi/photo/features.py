@@ -26,6 +26,8 @@ window is in bounds.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import cv2
@@ -36,6 +38,23 @@ from .io import PhotoError
 from .model import Part
 
 PAD = 400
+# Parts are measured on a small thread pool: OpenCV and most numpy work release
+# the GIL, and on the 2026-09-25 fixture 4 workers gave 3.2x over one, with
+# bit-identical numbers; more workers gained nothing (the rest holds the GIL).
+WORKERS = max(1, min(int(os.environ.get("AOI_PHOTO_WORKERS", "0")) or 6, os.cpu_count() or 1))
+_POOL: ThreadPoolExecutor | None = None
+
+
+def pool() -> ThreadPoolExecutor:
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(WORKERS, thread_name_prefix="aoi-measure")
+    return _POOL
+
+
+def measure_all(ref: "Frame", img: "Frame", parts: list[Part], **kw) -> dict[str, dict]:
+    """measure() for every part, in parallel, keyed by refdes in `parts` order."""
+    return dict(zip([p.refdes for p in parts], pool().map(lambda p: measure(ref, img, p, **kw), parts)))
 SEARCH = 24                     # local re-registration search, px
 # The window margin round a part is 0.9x its long side, capped so the window plus
 # the local search stays inside the PAD border added to every frame.
@@ -224,10 +243,21 @@ DE_KEEP = 3                     # coarse candidates refined at full resolution
 
 
 def _dE_at(g: np.ndarray, t: np.ndarray, geo: Geo, ox: int, oy: int, step: int = 1) -> float:
+    return _dE_many(g, t, geo, [(ox, oy)], step)[0]
+
+
+def _dE_many(g: np.ndarray, t: np.ndarray, geo: Geo, shifts: list[tuple[int, int]], step: int = 1) -> list[float]:
+    """_dE_at for several shifts in one numpy pass: the same numbers, without a
+    Python round trip (and the GIL) per shift."""
     p = geo.p
-    d = (t[geo.by + oy:geo.by + oy + p.h:step, geo.bx + ox:geo.bx + ox + p.w:step]
-         - g[geo.by:geo.by + p.h:step, geo.bx:geo.bx + p.w:step])
-    return float(np.median(np.sqrt((d * d * _W2).sum(-1))))
+    if not shifts:
+        return []
+    gw = g[geo.by:geo.by + p.h:step, geo.bx:geo.bx + p.w:step]
+    tw = np.stack([t[geo.by + oy:geo.by + oy + p.h:step, geo.bx + ox:geo.bx + ox + p.w:step]
+                   for ox, oy in shifts])
+    d = tw - gw
+    e = np.sqrt((d * d * _W2).sum(-1)).reshape(len(shifts), -1)
+    return [float(v) for v in np.median(e, axis=1)]
 
 
 def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo) -> float:
@@ -243,21 +273,16 @@ def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo) -> float:
     g = cv2.GaussianBlur(gl, (0, 0), 1.5); t = cv2.GaussianBlur(tl, (0, 0), 1.5)
     s = max(2, int(0.08 * max(p.w, p.h)))
     if (2 * s + 1) ** 2 <= DE_EXHAUSTIVE:
-        return min(_dE_at(g, t, geo, ox, oy) for oy in range(-s, s + 1) for ox in range(-s, s + 1))
+        return min(_dE_many(g, t, geo, [(ox, oy) for oy in range(-s, s + 1) for ox in range(-s, s + 1)]))
     grid = sorted(set(range(-s, s + 1, 2)) | {s})
-    coarse = sorted((_dE_at(g, t, geo, ox, oy, 2), ox, oy) for oy in grid for ox in grid)
+    cs = [(ox, oy) for oy in grid for ox in grid]
+    coarse = sorted((v, ox, oy) for v, (ox, oy) in zip(_dE_many(g, t, geo, cs, 2), cs))
     seen: dict[tuple[int, int], float] = {}
 
-    def exact(ox: int, oy: int) -> float:
-        if (ox, oy) not in seen:
-            seen[(ox, oy)] = _dE_at(g, t, geo, ox, oy)
-        return seen[(ox, oy)]
-
     def around(ox: int, oy: int) -> None:
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if abs(ox + dx) <= s and abs(oy + dy) <= s:
-                    exact(ox + dx, oy + dy)
+        new = [(ox + dx, oy + dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+               if abs(ox + dx) <= s and abs(oy + dy) <= s and (ox + dx, oy + dy) not in seen]
+        seen.update(zip(new, _dE_many(g, t, geo, new)))
 
     for _, ox, oy in coarse[:DE_KEEP]:
         around(ox, oy)
@@ -294,6 +319,9 @@ def _gap_contrast(l: np.ndarray, geo: Geo) -> float:
 
 # --------------------------------------------------------------- placement
 FLAT_PTP = 0.05                 # a body map with less range than this has no edge to match
+PLACE_NEAR = 6                  # full-resolution translation search round the coarse guess, px
+PLACE_KEEP = 3                  # coarse candidates refined at full resolution
+PLACE_MIN_HALF = 12             # templates under 2x this on a side are searched at full resolution only
 
 
 def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tuple[float, float, float]:
@@ -315,19 +343,80 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tu
     if float(np.ptp(g[y0:y1, x0:x1])) < FLAT_PTP or float(np.ptp(tw)) < FLAT_PTP:
         return float("nan"), float("nan"), float("nan")
 
-    def at(a: float):
-        R = cv2.getRotationMatrix2D((cx, cy), a, 1.0)
-        tpl = cv2.warpAffine(g, R, (g.shape[1], g.shape[0]), flags=cv2.INTER_LINEAR,
-                             borderMode=cv2.BORDER_CONSTANT)[y0:y1, x0:x1]
-        res = cv2.matchTemplate(tw, tpl, cv2.TM_SQDIFF) / tpl.size
-        v, _, loc, _ = cv2.minMaxLoc(res)
-        return float(v), res, loc
+    def tpl_at(src: np.ndarray, a: float, k: float) -> np.ndarray:
+        # only the template's own rectangle is rotated, not the whole window;
+        # k = 0.5 on the half-resolution maps
+        R = cv2.getRotationMatrix2D((cx * k, cy * k), a, 1.0)
+        R[0, 2] -= x0 * k; R[1, 2] -= y0 * k
+        return cv2.warpAffine(src, R, (int((x1 - x0) * k), int((y1 - y0) * k)), flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_CONSTANT)
 
-    best = min(np.arange(-rng_deg, rng_deg + 1e-6, 2.0), key=lambda a: at(a)[0])
-    best = float(min(np.arange(best - 2.0, best + 2.0 + 1e-6, 0.5), key=lambda a: at(a)[0]))
-    _, res, loc = at(best)
+    seen: dict[float, tuple] = {}
+
+    def at(a: float):
+        """Full search at angle a: (value, response map, location)."""
+        a = round(float(a), 6)
+        if a not in seen:
+            tpl = tpl_at(g, a, 1.0)
+            res = cv2.matchTemplate(tw, tpl, cv2.TM_SQDIFF) / tpl.size
+            v, _, loc, _ = cv2.minMaxLoc(res)
+            seen[a] = (float(v), res, loc)
+        return seen[a]
+
+    coarse_angles = np.arange(-rng_deg, rng_deg + 1e-6, 2.0)
+    th, tw_ = y1 - y0, x1 - x0
+    n_loc = (tw.shape[0] - th + 1) * (tw.shape[1] - tw_ + 1)
+    if min(th, tw_) < 2 * PLACE_MIN_HALF or n_loc <= 4 * (2 * PLACE_NEAR + 1) ** 2:
+        best = min(coarse_angles, key=lambda a: at(a)[0])
+        best = float(min(np.arange(best - 2.0, best + 2.0 + 1e-6, 0.5), key=lambda a: at(a)[0]))
+        _, res, loc = at(best)
+        px, py = subpixel(-res, loc)
+        return float(px + tx0 - x0), float(py + ty0 - y0), best
+
+    # Coarse to fine (an image pyramid, the usual way to make rotation +
+    # translation matching fast): the 2 deg steps on half-resolution maps, then
+    # the 0.5 deg steps at full resolution, translation searched only
+    # +-PLACE_NEAR px round where the coarse step put the body. A minimum on the
+    # edge of that window means the guess was off: that angle is searched in full.
+    g2 = cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    t2 = cv2.resize(tw, (tw.shape[1] // 2, tw.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    coarse = []
+    for a in coarse_angles:
+        tpl = tpl_at(g2, a, 0.5)
+        v, _, loc, _ = cv2.minMaxLoc(cv2.matchTemplate(t2, tpl, cv2.TM_SQDIFF) / tpl.size)
+        coarse.append((v, float(a), loc))
+    ry, rx = tw.shape[0] - th, tw.shape[1] - tw_          # largest valid location
+
+    def near(a: float, c_loc: tuple[int, int]):
+        """(value, response map, location in tw, clear of the window edge?) searched round the guess."""
+        gx, gy = min(max(2 * c_loc[0], 0), rx), min(max(2 * c_loc[1], 0), ry)
+        lx0, lx1 = max(0, gx - PLACE_NEAR), min(rx, gx + PLACE_NEAR)
+        ly0, ly1 = max(0, gy - PLACE_NEAR), min(ry, gy + PLACE_NEAR)
+        tpl = tpl_at(g, a, 1.0)
+        res = cv2.matchTemplate(tw[ly0:ly1 + th, lx0:lx1 + tw_], tpl, cv2.TM_SQDIFF) / tpl.size
+        v, _, (x, y), _ = cv2.minMaxLoc(res)
+        inside = ((0 < x < res.shape[1] - 1 or lx0 + x in (0, rx))
+                  and (0 < y < res.shape[0] - 1 or ly0 + y in (0, ry)))
+        return float(v), res, (x, y), (lx0, ly0), inside
+
+    # the PLACE_KEEP best coarse angles each refined: a body map with two near
+    # equal minima must not be settled by half-resolution rounding
+    fine: dict[float, tuple] = {}
+    for _, c_best, c_loc in sorted(coarse)[:PLACE_KEEP]:
+        for a in np.arange(c_best - 2.0, c_best + 2.0 + 1e-6, 0.5):
+            r = near(float(a), c_loc)
+            k = round(float(a), 6)
+            if k not in fine or r[0] < fine[k][0]:
+                fine[k] = r
+    best = min(fine, key=lambda a: fine[a][0])
+    _, res, loc, (lx0, ly0), inside = fine[best]
+    if not inside:
+        best = float(min(fine, key=lambda a: at(a)[0]))
+        _, res, loc = at(best)
+        px, py = subpixel(-res, loc)
+        return float(px + tx0 - x0), float(py + ty0 - y0), best
     px, py = subpixel(-res, loc)
-    return float(px + tx0 - x0), float(py + ty0 - y0), best
+    return float(px + lx0 + tx0 - x0), float(py + ly0 + ty0 - y0), best
 
 
 def body_rect(Bm: np.ndarray, geo: Geo) -> dict | None:
@@ -424,7 +513,8 @@ def outline_axis(thin: np.ndarray, geo: Geo) -> float | None:
 
 
 # ----------------------------------------------------------------- polarity
-def patch_in_golden_frame(win: np.ndarray, geo: Geo, dx: float, dy: float, dth: float, inset: float = 0.08) -> np.ndarray:
+def patch_in_golden_frame(win: np.ndarray, geo: Geo, dx: float, dy: float, dth: float, inset: float = 0.08,
+                          inset_long: float | None = None) -> np.ndarray:
     """Test body resampled into the golden body box, undoing the measured offset and turn."""
     p = geo.p
     # place() found that the golden body turned by +dth (cv2 convention) and
@@ -434,8 +524,10 @@ def patch_in_golden_frame(win: np.ndarray, geo: Geo, dx: float, dy: float, dth: 
     R[0, 2] += dx; R[1, 2] += dy
     full = cv2.warpAffine(win, R, (geo.W, geo.H), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                           borderMode=cv2.BORDER_REPLICATE)
-    return full[geo.by + int(inset * p.h):geo.by + p.h - int(inset * p.h),
-                geo.bx + int(inset * p.w):geo.bx + p.w - int(inset * p.w)]
+    il = inset if inset_long is None else inset_long
+    ix, iy = (il, inset) if p.horizontal else (inset, il)
+    return full[geo.by + int(iy * p.h):geo.by + p.h - int(iy * p.h),
+                geo.bx + int(ix * p.w):geo.bx + p.w - int(ix * p.w)]
 
 
 def highpass(patch: np.ndarray, p: Part) -> np.ndarray:
@@ -447,7 +539,18 @@ def highpass(patch: np.ndarray, p: Part) -> np.ndarray:
     return a[int(m * h):h - int(m * h), int(m * w):w - int(m * w)]
 
 
-STRIPE_TYPES = ("diode", "led", "bridge")     # polarity read from a band / bevel
+# Polarity read from a band. Not bridges: on the fixture BD1's bevel read the
+# wrong way on 2 of 3 good boards (-1.10, -2.01 against golden +1.6..+2.2) on
+# detector and hand boxes alike, and with 3 goldens that became a false
+# REVERSED; its marking reads the right way round on all of them, so a bridge
+# takes the marking check (judge._polarity) like an IC.
+STRIPE_TYPES = ("diode", "led")
+# The band is read with the ends trimmed harder along the body's length: a
+# detector box runs a little onto the leads, and bright lead metal at the ends
+# diluted the fixture's reversed D4 (test1) from -1.97 to -1.25, under
+# judge.STRIPE_CLEAR. At 0.14 it reads -2.22 on detector boxes, -2.25 on hand
+# boxes, and the good diodes read as clearly or more (in-sample, one board).
+STRIPE_INSET_LONG = 0.14
 
 
 def stripe_end(hp: np.ndarray, p: Part) -> float:
@@ -586,5 +689,9 @@ def measure(ref: Frame, img: Frame, p: Part, *, is_golden: bool = False) -> dict
     out.update(mark_s0=ncc(hp_t, hp_g), mark_s180=ncc(hp_t, np.rot90(hp_g, 2)),
                turn_margin=turn_margin(hp_t, hp_g))
     if p.polarized and p.type in STRIPE_TYPES:
-        out.update(stripe_g=stripe_end(hp_g, p), stripe_t=stripe_end(hp_t, p))
+        d = (dx, dy, dth) if placed else (0.0, 0.0, 0.0)
+        out.update(stripe_g=stripe_end(highpass(patch_in_golden_frame(g_grey, geo, 0, 0, 0,
+                                                                      inset_long=STRIPE_INSET_LONG), p), p),
+                   stripe_t=stripe_end(highpass(patch_in_golden_frame(t_grey, geo, *d,
+                                                                      inset_long=STRIPE_INSET_LONG), p), p))
     return out

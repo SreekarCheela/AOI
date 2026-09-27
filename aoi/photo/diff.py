@@ -130,13 +130,18 @@ def _grey(bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
 
-def touch_up(ref_grey: np.ndarray, img_bgr: np.ndarray) -> np.ndarray:
+def touch_up(ref_grey: np.ndarray, img_bgr: np.ndarray, ref_grad: np.ndarray | None = None) -> np.ndarray:
     """`img_bgr` re-aligned onto `ref_grey` by a smooth per-tile translation field.
 
     Rigid over a tile, so a part that moved inside a 160 px tile of board is not
     dragged along with it; the median filter stops one tile whose content
     changed (a missing part) from bending its neighbours."""
-    A, B = _grad(ref_grey), _grad(_grey(img_bgr))
+    # A copy of a cached gradient: cv2.phaseCorrelate (OpenCV 5) writes the
+    # Hanning window into its inputs, so half-overlapping tiles see the ones
+    # before them already windowed. The thresholds were tuned with that
+    # behaviour, so it is kept; the cached golden gradient must not collect it.
+    A = _grad(ref_grey) if ref_grad is None else ref_grad.copy()
+    B = _grad(_grey(img_bgr))
     H, W = A.shape
     if H < TILE or W < TILE:
         return img_bgr
@@ -182,29 +187,45 @@ def _shifts(r: int):
 
 
 def _colour_diff(Gl: np.ndarray, Tl: np.ndarray, r: int = SHIFT_R) -> np.ndarray:
-    """min over shifts of T within +-r of the Euclidean Lab distance."""
+    """min over shifts of T within +-r of the Euclidean Lab distance.
+
+    On separate channel planes: the same additions in the same order as a sum
+    over the interleaved channel axis, so the same numbers, about 3x faster."""
     H, W = Gl.shape[:2]
     P = cv2.copyMakeBorder(Tl, r, r, r, r, cv2.BORDER_REPLICATE)
+    Gp = [np.ascontiguousarray(Gl[..., c]) for c in range(3)]
+    Pp = [np.ascontiguousarray(P[..., c]) for c in range(3)]
     best = None
+    s = np.empty((H, W), np.float32); d = np.empty_like(s)
     for oy, ox in _shifts(r):
-        d = Gl - P[r + oy:r + oy + H, r + ox:r + ox + W]
-        d *= d
-        s = d.sum(-1)
-        best = s if best is None else np.minimum(best, s, out=best)
+        sl = (slice(r + oy, r + oy + H), slice(r + ox, r + ox + W))
+        np.subtract(Gp[0], Pp[0][sl], out=s); s *= s
+        for c in (1, 2):
+            np.subtract(Gp[c], Pp[c][sl], out=d); d *= d; s += d
+        if best is None:
+            best = s.copy()
+        else:
+            np.minimum(best, s, out=best)
     return np.sqrt(best)
 
 
-def _struct_diff(Gg: np.ndarray, Tg: np.ndarray, r: int = SHIFT_R) -> np.ndarray:
+def _struct_ref(Gg: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Golden side of _struct_diff: grey as float, local mean, local variance."""
+    a = Gg.astype(np.float32)
+    k = (NCC_WIN, NCC_WIN)
+    ma = cv2.blur(a, k)
+    return a, ma, cv2.blur(a * a, k) - ma * ma
+
+
+def _struct_diff(Gg: np.ndarray, Tg: np.ndarray, r: int = SHIFT_R, ref=None) -> np.ndarray:
     """1 - max over shifts (+-r) of local NCC (SSIM-style form) on grey.
 
     Shifting commutes with the box filter, so the test's local mean and variance
     are computed once and sliced; only the cross term is re-blurred per shift."""
-    a = Gg.astype(np.float32)
+    a, ma, va = _struct_ref(Gg) if ref is None else ref
     b0 = Tg.astype(np.float32)
     H, W = a.shape
     k = (NCC_WIN, NCC_WIN)
-    ma = cv2.blur(a, k)
-    va = cv2.blur(a * a, k) - ma * ma
     P = cv2.copyMakeBorder(b0, r, r, r, r, cv2.BORDER_REPLICATE)
     mP = cv2.blur(P, k)
     vP = cv2.blur(P * P, k) - mP * mP
@@ -237,11 +258,22 @@ def _board_valid(golden_s: np.ndarray, board_mask: np.ndarray | None) -> np.ndar
     return cv2.erode(bm.astype(np.uint8), np.ones((BOARD_ERODE, BOARD_ERODE), np.uint8)) > 0
 
 
-def _pair_maps(g_s: np.ndarray, t_s: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+class RefMaps:
+    """Everything _pair_maps computes from the golden crop alone. Built once per
+    golden and crop box, so a batch of boards does not redo golden 1's half."""
+
+    def __init__(self, g_s: np.ndarray):
+        self.grey = _grey(g_s)
+        self.grad = _grad(self.grey)
+        self.lab = _norm_lab(g_s)
+        self.struct = _struct_ref(self.grey)
+
+
+def _pair_maps(g_s: np.ndarray, t_s: np.ndarray, ref: RefMaps | None = None) -> tuple[np.ndarray, np.ndarray]:
     """(colour, structure) difference of working-res crops, test touched up first."""
-    gg = _grey(g_s)
-    t_s = touch_up(gg, t_s)
-    return _colour_diff(_norm_lab(g_s), _norm_lab(t_s)), _struct_diff(gg, _grey(t_s))
+    ref = ref or RefMaps(g_s)
+    t_s = touch_up(ref.grey, t_s, ref.grad)
+    return _colour_diff(ref.lab, _norm_lab(t_s)), _struct_diff(ref.grey, _grey(t_s), ref=ref.struct)
 
 
 # ------------------------------------------------------------------ public API
@@ -293,7 +325,7 @@ def spread_map(goldens_bgr: list[np.ndarray]) -> np.ndarray | None:
 
 def diff_blobs(golden_bgr: np.ndarray, aligned_bgr: np.ndarray, cover: np.ndarray | None,
                spread: np.ndarray | None = None, board_mask: np.ndarray | None = None,
-               min_side_px: int | None = None) -> list[Blob]:
+               min_side_px: int | None = None, cache: dict | None = None) -> list[Blob]:
     """Regions where the aligned test differs from golden 1, strongest first.
 
     aligned_bgr: the test already in golden-1 pixels (register.warp_to_ref).
@@ -302,15 +334,21 @@ def diff_blobs(golden_bgr: np.ndarray, aligned_bgr: np.ndarray, cover: np.ndarra
     spread: spread_map() of the goldens, or None (single golden).
     board_mask: 1 on the board at any resolution; gate.board_mask(golden) if None.
     min_side_px: if given (full-res px, e.g. the smallest part's short side), a
-      blob whose longer side is under half of it is dropped."""
+      blob whose longer side is under half of it is dropped.
+    cache: a dict kept with golden 1 across a batch; golden-only work is stored
+      in it (it must only ever be passed with the same golden and board mask)."""
     if golden_bgr.shape[:2] != aligned_bgr.shape[:2]:
         raise ValueError(f"aligned test {aligned_bgr.shape[:2]} is not in golden pixels "
                          f"{golden_bgr.shape[:2]}")
+    cache = {} if cache is None else cache
     s = _scale(golden_bgr.shape)
-    g_s = _small(golden_bgr, s)
+    if "g_s" not in cache:
+        cache["g_s"] = _small(golden_bgr, s)
+        cache["board_valid"] = _board_valid(cache["g_s"], board_mask)
+    g_s = cache["g_s"]
     t_s = _small(aligned_bgr, s)
     shape = g_s.shape[:2]
-    valid = _board_valid(g_s, board_mask)
+    valid = cache["board_valid"].copy()
     if cover is not None:
         valid &= cv2.erode(_fit(cover, shape).astype(np.uint8),
                            np.ones((COVER_ERODE, COVER_ERODE), np.uint8)) > 0
@@ -320,7 +358,10 @@ def diff_blobs(golden_bgr: np.ndarray, aligned_bgr: np.ndarray, cover: np.ndarra
     y0, y1, x0, x1 = box
     g_c, t_c, v_c = g_s[y0:y1, x0:x1], t_s[y0:y1, x0:x1], valid[y0:y1, x0:x1]
 
-    cm, sm = _pair_maps(g_c, t_c)
+    key = ("ref", box)
+    if key not in cache:
+        cache[key] = RefMaps(g_c)
+    cm, sm = _pair_maps(g_c, t_c, cache[key])
     tc = T_COLOUR
     ts = T_STRUCT
     if spread is not None:

@@ -248,12 +248,13 @@ def _polarity(p: Part, m: dict, single_golden: bool, stats: dict | None) -> list
 
     Which check runs is set by the part's type, nothing else:
 
-    * type diode, led or bridge: the band / bevel check (features.stripe_end).
-      A cathode band or bevel is a stripe dark across the whole body at one end;
-      the golden's stripe must be clear (|contrast| >= STRIPE_CLEAR) or the check
-      is UNINSPECTED, and a test stripe clearly at the other end is POLARITY
-      REVIEW (REVERSED once >= 3 goldens agree on the band).
-    * any other type (ic, sot23, regulator, resistor, capacitor, other): the
+    * type diode or led: the band check (features.stripe_end). A cathode band
+      is a stripe dark across the whole body at one end; the golden's stripe
+      must be clear (|contrast| >= STRIPE_CLEAR) or the check is UNINSPECTED,
+      and so it is when most goldens do not show golden 1's band clearly at the
+      same end; a test stripe clearly at the other end is POLARITY REVIEW
+      (REVERSED once >= 3 goldens agree on the band).
+    * any other type (bridge, ic, sot23, regulator, resistor, capacitor, other): the
       marking check. The test body's marking is compared with the golden's
       as-is and turned 180 deg; matching the turned one better by more than
       TURN_REVIEW is POLARITY REVIEW. It needs readable marking or asymmetric
@@ -266,6 +267,16 @@ def _polarity(p: Part, m: dict, single_golden: bool, stats: dict | None) -> list
     calls = []
     if "stripe_g" in m:
         sg, st = m["stripe_g"], m["stripe_t"]
+        agree = stats.get("stripe_agree") if stats else None
+        if not single_golden and agree is not None and 2 * agree[0] <= agree[2]:
+            # most goldens do not show golden 1's band clearly at the same end
+            # (the fixture's D1: golden 1's smudged marking reads -1.72 as a
+            # band, goldens 2 and 3 +0.46 and -0.24, every test board about +2):
+            # a band only golden 1 sees is not a reference to judge a board by
+            calls.append(Call("polarity", "UNINSPECTED",
+                              f"band/bevel clear on only {agree[0]:.0f} of {agree[2]:.0f} goldens; "
+                              "polarity not judged", measured_against="golden band"))
+            return calls
         if abs(sg) < STRIPE_CLEAR:
             calls.append(Call("polarity", "UNINSPECTED",
                               f"golden band/bevel unclear ({sg:+.2f}); polarity not judged",

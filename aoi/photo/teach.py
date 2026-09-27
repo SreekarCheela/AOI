@@ -134,8 +134,7 @@ def self_check(golden_bgr: np.ndarray, parts: list[Part]) -> tuple[list[tuple[st
     or placement, which made a board with nothing checkable cost ~8 s."""
     ref = F.Frame.of(golden_bgr)
     flags, unchecked = [], []
-    for p in parts:
-        m = F.golden_outline(ref, p)
+    for p, m in zip(parts, F.pool().map(lambda q: F.golden_outline(ref, q), parts)):
         sk = m.get("skew_silk", float("nan"))
         if not math.isnan(sk) and m.get("silk_len", 0) >= 150 and abs(sk) > config.MAX_SKEW_DEG:
             flags.append((p.refdes, f"{sk:+.1f} deg against its silkscreen outline"))
@@ -223,8 +222,7 @@ def golden_stats(goldens: list[np.ndarray], parts: list[Part],
             H = reg.H
         w, c = register.warp_to_ref(g, H, goldens[0].shape)
         img = F.Frame.of(w, c)
-        for p in parts:
-            m = F.measure(ref, img, p)
+        for p, m in zip(parts, F.measure_all(ref, img, parts).values()):
             if not m.get("in_view"):
                 continue
             samples[p.refdes]["missing_logit"].append(missing_logit(m))
@@ -246,6 +244,9 @@ def golden_stats(goldens: list[np.ndarray], parts: list[Part],
         if st:
             clear_same = all(abs(v) >= 1.5 and np.sign(v) == np.sign(st[0]) for v in st)
             s["stripe_consistent"] = (1.0 if clear_same and len(st) >= 3 else 0.0, 0.0, len(st))
+            # goldens (golden 1 included) whose band is clear and at golden 1's end
+            s["stripe_agree"] = (float(sum(1 for v in st if abs(v) >= 1.5 and abs(st[0]) >= 1.5
+                                           and np.sign(v) == np.sign(st[0]))), 0.0, len(st))
         stats[r] = s
     return stats
 

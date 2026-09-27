@@ -37,10 +37,12 @@ class Golden:
         self.bgr = load_bgr(program.golden_paths()[0])
         self.grey = grey(self.bgr)
         self.frame = F.Frame.of(self.bgr)
+        self.keypoints = register.keypoints(self.grey)
         self.sharpness = float(np.median([gate.sharpness(load_bgr(p)) for p in program.golden_paths()]))
         sp = program.spread_path
         self.spread = np.load(sp) if sp.exists() else None
         self._board_mask: np.ndarray | None = None
+        self.diff_cache: dict = {}                 # diff.diff_blobs' golden-only work
 
     @property
     def board_mask(self) -> np.ndarray:
@@ -54,16 +56,27 @@ def _grown(p: Part, pad: float) -> tuple[int, int, int, int]:
     return int(p.x - m), int(p.y - m), int(p.w + 2 * m), int(p.h + 2 * m)
 
 
-def differences(res: BoardResult, program: Program, golden: Golden, warped: np.ndarray,
-                cover: np.ndarray | None) -> None:
-    """Whole-board difference blobs off every taught part -> UNEXPECTED DIFFERENCE parts."""
+def _diff_blobs(program: Program, golden: Golden, warped: np.ndarray, cover: np.ndarray | None):
+    """diff.diff_blobs for this board, or the ValueError it raised (returned, so
+    it can run on the pool beside the parts and be reported afterwards)."""
     from . import diff
     min_side = min((max(p.w, p.h) for p in program.parts), default=0) or None
     try:
-        blobs = diff.diff_blobs(golden.bgr, warped, cover, spread=golden.spread,
-                                board_mask=golden.board_mask, min_side_px=min_side)
+        return diff.diff_blobs(golden.bgr, warped, cover, spread=golden.spread,
+                               board_mask=golden.board_mask, min_side_px=min_side,
+                               cache=golden.diff_cache)
     except ValueError as e:
-        res.reasons.append(f"whole-board difference not run: {e}")
+        return e
+
+
+def differences(res: BoardResult, program: Program, golden: Golden, warped: np.ndarray,
+                cover: np.ndarray | None, blobs=None) -> None:
+    """Whole-board difference blobs off every taught part -> UNEXPECTED DIFFERENCE parts."""
+    from . import diff
+    if blobs is None:
+        blobs = _diff_blobs(program, golden, warped, cover)
+    if isinstance(blobs, ValueError):
+        res.reasons.append(f"whole-board difference not run: {blobs}")
         return
     grown = [_grown(p, config.PHOTO_DIFF_PART_PAD) for p in program.parts]
     off = [b for b in blobs
@@ -99,7 +112,7 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
                       verdict="REVIEW", px_per_mm=program.px_per_mm,
                       single_golden=program.single_golden, stamp=program.stamp)
     bgr = load_bgr(image)
-    reg = register.register(golden.grey, grey(bgr))
+    reg = register.register(golden.keypoints, grey(bgr))
     res.registration = dict(ok=reg.ok, inliers=reg.inliers, matches=reg.matches, fit=reg.fit, note=reg.note)
     if not reg.ok:
         return _board_review(res, f"could not align: {reg.note}; does not match program "
@@ -111,7 +124,9 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
 
     warped, cover = register.warp_to_ref(bgr, reg.H, golden.bgr.shape)
     img = F.Frame.of(warped, cover)
-    measures = {p.refdes: F.measure(golden.frame, img, p) for p in program.parts}
+    _ = golden.board_mask                          # built once, before the pool shares it
+    blobs = F.pool().submit(_diff_blobs, program, golden, warped, cover) if config.PHOTO_DIFF else None
+    measures = F.measure_all(golden.frame, img, program.parts)
     noise = judge.board_noise(measures)
     res.common_shift_px = (noise["dx"], noise["dy"])
     res.noise_px = noise["sigma"]
@@ -120,8 +135,8 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
         res.parts.append(judge.judge_part(p, measures[p.refdes], noise=noise, px_per_mm=program.px_per_mm,
                                           stats=program.golden_stats.get(p.refdes),
                                           single_golden=program.single_golden))
-    if config.PHOTO_DIFF:
-        differences(res, program, golden, warped, cover)
+    if blobs is not None:
+        differences(res, program, golden, warped, cover, blobs.result())
     shift = math.hypot(noise["dx"], noise["dy"])
     if res.offset_limit_px > 0 and shift > res.offset_limit_px:
         res.board_calls.append(Call("board", "NOT CHECKED",

@@ -62,7 +62,7 @@ import cv2
 import numpy as np
 
 from aoi import config
-from aoi.photo import gate, io, judge, program, record, report, teach
+from aoi.photo import gate, io, judge, names, program, record, report, teach
 from aoi.photo import inspect as photo_inspect
 from aoi.photo.model import MARKED_ENDS, PART_TYPES, UNVALIDATED, BoardResult, Part
 from aoi.review import BG, DEFECT, DIM, FALSE, INK, PANEL, RULE
@@ -324,6 +324,27 @@ class BoxList:
         if added:
             self._undo.append(("add", added))
         return len(added), skipped
+
+    def apply_names(self, rects, found: list[str | None]) -> tuple[int, int]:
+        """Silkscreen names onto the boxes they were read for: (named, left).
+        Only a box still carrying its auto name and still where it was found
+        takes one, so nothing the operator typed or moved is overwritten; the
+        name's letter sets the type and whether it is polarized."""
+        taken = {b.refdes for b in self.boxes if b.named}
+        named = 0
+        for r, n in zip(rects, found):
+            if not n or n in taken:
+                continue
+            r = tuple(int(v) for v in r)
+            i = next((k for k, b in enumerate(self.boxes) if not b.named and b.rect == r), None)
+            if i is None:
+                continue
+            t, pol = names.type_of(n)
+            self.boxes[i].refdes = n
+            self.set_fields(i, type=t, polarized=pol)
+            taken.add(n)
+            named += 1
+        return named, self.unnamed
 
     def hit(self, x: float, y: float) -> int | None:
         """The smallest box under an image point, so a part inside a bigger one stays clickable."""
@@ -872,6 +893,16 @@ def propose_worker(q: queue.Queue, gen: int, bgr: np.ndarray) -> None:
     q.put(("proposals", gen, rects, from_detector, ""))
 
 
+def names_worker(q: queue.Queue, gen: int, bgr: np.ndarray, rects) -> None:
+    """The board's own silkscreen names for the found boxes (names.py)."""
+    try:
+        res = names.name_boxes(bgr, [tuple(int(v) for v in r) for r in rects])
+    except Exception as e:                        # noqa: BLE001
+        q.put(("names", gen, rects, [None] * len(rects), error_text(e)))
+        return
+    q.put(("names", gen, rects, res.names, res.note, res.unsure))
+
+
 def retrain_worker(q: queue.Queue, programs_root: Path) -> None:
     """Rebuild the part detector from every saved program and labelled shoot."""
     from aoi.photo import detect_train
@@ -1190,6 +1221,7 @@ class App:
             "golden_checked": self._on_golden_checked,
             "editor_image": self._on_editor_image,
             "proposals": self._on_proposals,
+            "names": self._on_names,
             "retrain_log": lambda msg: self.status(msg, error="failed" in msg),
             "teach_ok": self._on_teach_ok,
             "teach_error": self._on_teach_error,
@@ -1331,7 +1363,7 @@ class App:
             self._sync_setup()
         elif name == "inspect":
             self._inspect_finished()
-        elif name == "propose":
+        elif name in ("propose", "names"):
             self._sync_setup()
 
     def on_close(self) -> None:
@@ -1674,7 +1706,7 @@ class App:
         return save_checklist(self.v_name.get(), [self.golden_status.get(str(p)) for p in self.golden_paths],
                               self.boxes.problems(), len(self.boxes), self.boxes.polarized,
                               self.v_scale.get(), self.v_scale_mode.get(),
-                              finding="propose" in self.busy)
+                              finding="propose" in self.busy or "names" in self.busy)
 
     def _sync_setup(self) -> None:
         """Every control, the checklist, the banner and the instruction, from
@@ -1727,6 +1759,8 @@ class App:
             return "Loading golden 1..."
         if "propose" in self.busy:
             return "Finding the parts on golden 1..."
+        if "names" in self.busy:
+            return "Reading every part's name (R12, C9, D4...) off the board's silkscreen..."
         if reason:
             return f"Before saving: {reason}."
         return ("Parts found. Delete any box that is not a part, mark polarized parts (optional), "
@@ -2069,9 +2103,31 @@ class App:
         note = ("" if from_detector else
                 "  No trained part detector yet: these come from colour alone and include pads; "
                 "delete the boxes that are not parts.")
-        self.status(f"{added} part(s) found, named P1, P2, ...; renaming is optional"
+        reading = names.available() and added
+        self.status(f"{added} part(s) found"
+                    + ("; reading their names off the board..." if reading else
+                       ", named P1, P2, ...; renaming is optional")
                     + (f"; {skipped} already boxed" if skipped else "") + note,
                     error=not from_detector)
+        if reading and self.ed.full is not None:
+            self._spawn("names", names_worker, gen, self.ed.full, [tuple(r) for r in rects])
+            self._sync_setup()
+
+    def _on_names(self, gen: int, rects, found: list[str | None], note: str = "",
+                  unsure: list[str] | None = None) -> None:
+        if gen != self.teach_gen or not self._can_edit():
+            return
+        named, left = self.boxes.apply_names(rects, found)
+        self._after_boxes_changed()
+        pol = self.boxes.polarized
+        msg = (f"{named} part(s) named from the board's silkscreen; {pol} polarized (from D, LED, BD, "
+               f"Q, T, U names), checked automatically")
+        if left:
+            msg += f"; {left} without a readable name keep P-numbers: click one and type its name"
+        check = [n for n in (unsure or []) if any(b.refdes == n for b in self.boxes.boxes)]
+        if check:
+            msg += "; check " + ", ".join(check) + " (close calls)"
+        self.status(msg + (f" ({note})" if note else ""), error=bool(note))
 
     def retrain(self) -> None:
         if "retrain" in self.busy:

@@ -296,7 +296,7 @@ def test_polarity_follows_type_and_polarized():
     pr = judge.judge_part(_part(type="diode", polarized=True), band, noise=QUIET, px_per_mm=45.2,
                           stats=None, single_golden=True)
     assert pr.state == "POLARITY REVIEW"
-    assert set(F.STRIPE_TYPES) == {"diode", "led", "bridge"}
+    assert set(F.STRIPE_TYPES) == {"diode", "led"}         # a bridge's bevel misread; marking check
 
 
 @needs_fixture

@@ -46,16 +46,32 @@ class Registration:
         return self.H is not None
 
 
-def register(ref: np.ndarray, img: np.ndarray) -> Registration:
-    """Homography taking `img` onto `ref`, or a refusal that says why."""
-    r_s, r_k = _small(ref)
-    i_s, i_k = _small(img)
+@dataclass
+class Keypoints:
+    """One photo's reduced copy and its SIFT features: golden 1's are computed
+    once per batch and reused for every test photo."""
+    small: np.ndarray
+    k: float
+    kp: tuple
+    desc: np.ndarray | None
+
+
+def keypoints(grey_img: np.ndarray) -> Keypoints:
+    s, k = _small(grey_img)
     # Local contrast equalisation first, so a photo shot a little brighter or
     # under a different lamp still produces the same keypoints.
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    sift = cv2.SIFT_create(nfeatures=8000)
-    kr, dr = sift.detectAndCompute(clahe.apply(r_s), None)
-    ki, di = sift.detectAndCompute(clahe.apply(i_s), None)
+    kp, desc = cv2.SIFT_create(nfeatures=8000).detectAndCompute(clahe.apply(s), None)
+    return Keypoints(s, k, kp, desc)
+
+
+def register(ref: np.ndarray | Keypoints, img: np.ndarray) -> Registration:
+    """Homography taking `img` onto `ref`, or a refusal that says why. `ref`
+    may be its precomputed keypoints."""
+    rk = ref if isinstance(ref, Keypoints) else keypoints(ref)
+    r_s, r_k, kr, dr = rk.small, rk.k, rk.kp, rk.desc
+    ik = keypoints(img)
+    i_s, i_k, ki, di = ik.small, ik.k, ik.kp, ik.desc
     if dr is None or di is None or len(kr) < REG_MIN_INLIERS or len(ki) < REG_MIN_INLIERS:
         return Registration(None, 0, 0, "too few features -- is the photo in focus?")
 

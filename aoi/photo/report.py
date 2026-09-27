@@ -352,7 +352,8 @@ def write_all(result: BoardResult, golden_bgr: np.ndarray, aligned_test_bgr: np.
              "html": out_dir / f"{stem}.html"}
 
     annotated = annotate(aligned_test_bgr, result)
-    if not cv2.imwrite(str(paths["annotated"]), annotated):
+    # fastest zlib level: the same pixels, ~10% larger, about half the time on a 12 MP board
+    if not cv2.imwrite(str(paths["annotated"]), annotated, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
         raise OSError(f"could not write {paths['annotated']}")
     # Crops come from the photo, not the annotated copy: an operator judging a
     # part needs to see the part, not the box drawn over it.
