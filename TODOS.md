@@ -27,6 +27,12 @@ Deferred from the Photo AOI plan (~/.gstack/projects/SreekarCheela-AOI/main-desi
   OFFSET when taught from detector boxes without a board length; with a length
   the 150 um floor absorbs it. A floor in px for no-scale programs (e.g. from
   the smallest part's size) would fix it.
+- **Offset along a chip's length on dull-solder photos** (P1, M). The body map
+  counts dull solder as body, so on the Test 2 HEIC shots R18, R10, R9, R16 (and
+  R7, R5, R8, R20, D4) run past both ends of place()'s template and the length
+  shift is not measured (`features.open_axes`, kept in `measures["open_axes"]`).
+  C5 and R4 still false-call from glare changing the test body map. Fix at the
+  source: cross-polarised light, then re-measure; then separate solder from body.
 - **Whole-board difference on a board it was not tuned on** (P2, M). diff.py's
   constants and the bare-metal / part-ownership rules were set on the fixture
   (in-sample). Measure on a second board type before trusting its false-box rate.

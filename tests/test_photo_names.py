@@ -61,6 +61,13 @@ def test_merge_pools_readings_of_one_place_by_summed_confidence():
     assert [g.name for g in got] == ["R8"] and set(got[0].votes) == {"R6", "R8"}
 
 
+def test_merge_keeps_a_sideways_list_of_names_apart():
+    # Test 2's C7 R12 C8 R13 printed rotated: neighbouring names one line
+    # (~0.8 character heights) apart, side by side, not one text read twice
+    got = N.merge([lab(n, 100 + 80 * k, 100, h=100, w=75) for k, n in enumerate(["C7", "R12", "C8", "R13"])])
+    assert sorted(g.name for g in got) == ["C7", "C8", "R12", "R13"]
+
+
 # ------------------------------------------------------------------ assignment
 def row_board():
     """A row of ten parts with their names printed as a row centred below

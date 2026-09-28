@@ -222,12 +222,19 @@ def _read_vision(img: np.ndarray) -> list[tuple[str, float, np.ndarray]]:
         if score < MIN_SCORE:
             continue
         text = str(c.string())
-        for name, a, b in designators(text):
+        found = designators(text)
+        line = o.boundingBox()
+        for name, a, b in found:
             box, _ = c.boundingBoxForRange_error_((a, b - a), None)
             if box is None:
                 continue
             bb = box.boundingBox()                  # normalised, origin bottom left
             x0, x1 = bb.origin.x * W, (bb.origin.x + bb.size.width) * W
+            if len(found) > 1 and bb.size.width >= 0.9 * line.size.width:
+                # Vision often answers a range with the whole line's box ("R6 R3"
+                # as one 261 px box for each name): split it by character share
+                lx0, lw = line.origin.x * W, line.size.width * W
+                x0, x1 = lx0 + lw * a / len(text), lx0 + lw * b / len(text)
             y0, y1 = (1 - bb.origin.y - bb.size.height) * H, (1 - bb.origin.y) * H
             out.append((name, score, np.float32([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])))
     return out
@@ -300,15 +307,32 @@ def read_labels(bgr: np.ndarray, region: tuple[int, int, int, int] | None = None
     return read_many(bgr, [region], scale)[0]
 
 
+def _overlap(a: tuple, b: tuple) -> float:
+    """Intersection of two text boxes over the smaller one's area."""
+    iw = min(a[2], b[2]) - max(a[0], b[0])
+    ih = min(a[3], b[3]) - max(a[1], b[1])
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return iw * ih / max(small, 1e-6)
+
+
+SAME_TEXT = 0.3                 # box overlap above which two different readings are one text
+
+
 def merge(labels: list[Label]) -> list[Label]:
     """One name per place. Readings within 0.8 character heights of each other
     are one place; its name is the one with the most summed confidence over
     every recogniser and turn (R8 read by Vision twice beats PP-OCR's one "R6"),
-    its score that sum. The same name at two places close together is one."""
+    its score that sum. The same name at two places close together is one.
+    Two different names are one place only when their text boxes overlap:
+    a list printed sideways (Test 2's C7 R12 C8 R13) puts neighbouring names
+    one line apart, inside 0.8 character heights, but side by side."""
     places: list[list[Label]] = []
     for lb in sorted(labels, key=lambda l: -l.score):
         for pl in places:
-            if np.hypot(lb.x - pl[0].x, lb.y - pl[0].y) < 0.8 * max(lb.h, pl[0].h):
+            if np.hypot(lb.x - pl[0].x, lb.y - pl[0].y) < 0.8 * max(lb.h, pl[0].h) \
+                    and (lb.name == pl[0].name or _overlap(lb.box, pl[0].box) >= SAME_TEXT):
                 pl.append(lb)
                 break
         else:
@@ -660,7 +684,7 @@ def name_boxes(golden_bgr: np.ndarray, rects: list[tuple[int, int, int, int]]) -
     read round every box still unnamed, and the assignment again."""
     if not available():
         return Naming([None] * len(rects), note="silkscreen names need rapidocr (see requirements.txt)")
-    labels = read_labels(golden_bgr, _board_region(golden_bgr))
+    labels = rescore_duplicates(golden_bgr, read_labels(golden_bgr, _board_region(golden_bgr)))
     detail: dict = {}
     names = assign(rects, labels, golden_bgr, detail)
     close = rects if LOCAL_ALL else [r for r, n in zip(rects, names) if n is None]
@@ -677,6 +701,35 @@ def name_boxes(golden_bgr: np.ndarray, rects: list[tuple[int, int, int, int]]) -
         labels = add_local(labels, merge(extra))
         names = assign(rects, labels, golden_bgr, detail)
     return Naming(names, labels, margin=detail.get("margin", []), cost=detail.get("cost", []))
+
+
+DUP_MARGIN = 1.5                # close-up round a duplicated name, character heights
+
+
+def rescore_duplicates(bgr: np.ndarray, labels: list[Label]) -> list[Label]:
+    """A name read at two places is one misread (Test 2's R8 read "R6" by
+    every recogniser, as confidently as R6 itself board-wide). Close up, the
+    real one reads at every turn and the misread one only at some (R6 ~6
+    against ~1-3), so each place's score becomes its close-up score for that
+    name, and _repair keeps the name on the better-read place."""
+    count: dict[str, int] = {}
+    for lb in labels:
+        count[lb.name] = count.get(lb.name, 0) + 1
+    dup = [k for k, lb in enumerate(labels) if count[lb.name] > 1]
+    if not dup:
+        return labels
+    regions = []
+    for k in dup:
+        lb = labels[k]
+        m = DUP_MARGIN * lb.h
+        regions.append((int(lb.x - m), int(lb.y - m), int(2 * m), int(2 * m)))
+    out = list(labels)
+    for k, found in zip(dup, read_many(bgr, regions, LOCAL_SCALE, readers=LOCAL_READERS)):
+        lb = labels[k]
+        s = sum(f.votes.get(lb.name, 0.0) for f in found
+                if np.hypot(f.x - lb.x, f.y - lb.y) < 0.8 * max(f.h, lb.h))
+        out[k] = Label(lb.name, lb.x, lb.y, lb.h, s, lb.box, {**lb.votes, lb.name: s})
+    return out
 
 
 def add_local(board: list[Label], local: list[Label]) -> list[Label]:

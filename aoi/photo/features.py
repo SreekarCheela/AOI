@@ -419,6 +419,30 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tu
     return float(px + lx0 + tx0 - x0), float(py + ly0 + ty0 - y0), best
 
 
+PLACE_OPEN_END = 0.5            # body fraction at both template ends: that axis has no edge
+
+
+def open_axes(geo: Geo, Bg: np.ndarray) -> str:
+    """Axes ("x", "y", "xy" or "") along which place() has nothing to lock onto:
+    the golden body map, blurred as place() sees it, is still body at both ends
+    of its template. Dull solder fillets read as body, so a chip resistor on a
+    phone photo can be one strip past both ends of its box, and the match then
+    slides along it to the edge of its search (Test 2: R18 51 of 52 px, R10 31
+    of 38, R9 and R16 along their length, bodies not moved)."""
+    p = geo.p
+    g = cv2.GaussianBlur(Bg, (0, 0), max(1.0, 0.06 * min(p.w, p.h)))
+    e = int(0.35 * min(p.w, p.h)) + 4
+    t = g[geo.by - e:geo.by + p.h + e, geo.bx - e:geo.bx + p.w + e]
+    rows, cols = slice(e, e + p.h), slice(e, e + p.w)
+    k = 3
+    out = ""
+    if min(float(t[rows, :k].mean()), float(t[rows, -k:].mean())) > PLACE_OPEN_END:
+        out += "x"
+    if min(float(t[:k, cols].mean()), float(t[-k:, cols].mean())) > PLACE_OPEN_END:
+        out += "y"
+    return out
+
+
 def body_rect(Bm: np.ndarray, geo: Geo) -> dict | None:
     """Largest body blob overlapping the expected box: size along the part's own
     pad axis, width, area, long-axis orientation, and how much of each end of the
@@ -666,7 +690,14 @@ def measure(ref: Frame, img: Frame, p: Part, *, is_golden: bool = False) -> dict
 
     # placement
     dx, dy, dth = place(geo, Bg, Bt)
-    out.update(dx=dx, dy=dy, dth=dth)
+    # an axis the golden body gives no edge along is not measured: its shift
+    # is the slide along a strip, not a placement (open_axes). dx, dy stay raw
+    # for board_noise, whose sigma sets every part's offset limit; the judge
+    # and the marking sample below drop the open component.
+    op = open_axes(geo, Bg)
+    out.update(dx=dx, dy=dy, dth=dth, open_axes=op)
+    if not np.isnan(dx):
+        dx, dy = (0.0 if "x" in op else dx), (0.0 if "y" in op else dy)
     rg, rt = body_rect(Bg, geo), body_rect(Bt, geo)
     out["body_g"], out["body_t"] = rg, rt
     out["colour_g"], out["colour_t"] = colour_class(gl[geo.core]), colour_class(tl[geo.core])

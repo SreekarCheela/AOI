@@ -128,11 +128,6 @@ def judge_part(p: Part, m: dict, *, noise: dict, px_per_mm: float, stats: dict |
         pr.calls.append(Call("view", "NOT CHECKED", m.get("view_note") or "outside this photo",
                              measured_against="photo coverage"))
         return pr
-    if m["glare"] > config.PHOTO_MAX_GLARE_FRAC:
-        pr.calls.append(Call("glare", "NOT CHECKED",
-                             f"{m['glare']:.0%} of the body is blown out by glare; reshoot with diffuse light",
-                             measured_against="photo exposure"))
-        return pr
     against = "fixed thresholds (single golden)" if single_golden else "golden spread"
 
     # 1. missing
@@ -157,10 +152,22 @@ def judge_part(p: Part, m: dict, *, noise: dict, px_per_mm: float, stats: dict |
                                  _sigmoid(z - cut), False, against))
             return pr
 
+    # glare only after the missing check: a missing part leaves bare tinned
+    # lands, which are what blows out (Test 2 test1: C7, C8, R13 at 26-27%
+    # glare, every part present under 7%), so glare stops the finer checks only
+    if m["glare"] > config.PHOTO_MAX_GLARE_FRAC:
+        pr.calls.append(Call("glare", "NOT CHECKED",
+                             f"{m['glare']:.0%} of the body is blown out by glare; reshoot with diffuse light",
+                             measured_against="photo exposure"))
+        return pr
+
     # body is there: record where it sits, net of the board-wide shift
     placed = not any(math.isnan(m[k]) for k in ("dx", "dy", "dth"))
+    op = m.get("open_axes", "")
     if placed:
         pr.dx_px, pr.dy_px, pr.dtheta_deg = m["dx"] - noise["dx"], m["dy"] - noise["dy"], m["dth"]
+        pr.dx_px = 0.0 if "x" in op else pr.dx_px          # not measured along that axis
+        pr.dy_px = 0.0 if "y" in op else pr.dy_px
 
     # 2. tombstone: short along the pad axis and one end of the footprint bare
     g, t = m.get("body_g"), m.get("body_t")

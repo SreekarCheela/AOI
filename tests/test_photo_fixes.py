@@ -78,6 +78,21 @@ def test_missing_cutoff_never_tighter_than_single_golden_nor_unbounded():
                             single_golden=False).state == "OK"
 
 
+# ------------------------------------------------ open axis (2026-09-28, Test 2 R18/R10)
+def test_an_axis_the_golden_body_runs_off_is_not_measured():
+    p = _part(w=100, h=40)
+    geo = F.Geo(p)
+    closed = np.zeros((geo.H, geo.W), np.float32); closed[geo.body] = 1
+    strip = np.zeros_like(closed); strip[geo.by:geo.by + p.h, :] = 1     # solder read as body past both ends
+    assert F.open_axes(geo, closed) == "" and F.open_axes(geo, strip) == "x"
+    # a 40 px slide along the strip is no offset; the same shift across it is
+    m = _meas(dx=40.0, open_axes="x")
+    pr = judge.judge_part(p, m, noise=QUIET, px_per_mm=45.2, stats=None, single_golden=True)
+    assert pr.state == "OK" and pr.dx_px == 0.0 and pr.measures["open_axes"] == "x"
+    m = _meas(dy=40.0, open_axes="x")
+    assert judge.judge_part(p, m, noise=QUIET, px_per_mm=45.2, stats=None, single_golden=True).state == "OFFSET"
+
+
 @needs_fixture
 def test_golden_stats_leave_out_golden_one_against_itself(tmp_path):
     from aoi.photo import teach
