@@ -181,6 +181,9 @@ def normalise(t_win: np.ndarray, g_win: np.ndarray, ring: np.ndarray) -> np.ndar
 
 
 # ---------------------------------------------------------- body classes
+MARK_FILL = 0.12                # body-map hole fill, x the part's short side (a marking stroke)
+
+
 class Classes:
     """What a bare footprint shows: green soldermask or bright bare metal.
 
@@ -198,6 +201,8 @@ class Classes:
         self.L_body = float(np.median(g_lab[geo.core][..., 0]))
         self.L_thr = (max(150.0, 0.5 * (self.L_body + self.L_pad))
                       if self.L_body < self.L_pad - 30 else self.L_pad - 15.0)
+        k = max(3, int(MARK_FILL * min(geo.p.w, geo.p.h))) | 1
+        self._fill = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
 
     def green(self, l: np.ndarray) -> np.ndarray:
         return l[..., 1] < self.a_thr
@@ -206,7 +211,14 @@ class Classes:
         return (np.hypot(l[..., 1] - 128, l[..., 2] - 128) < 22) & (l[..., 0] > self.L_thr)
 
     def body_map(self, l: np.ndarray) -> np.ndarray:
-        return (~self.green(l) & ~self.metal(l)).astype(np.float32)
+        """Neither soldermask nor bare metal, with stroke-sized holes closed:
+        white marking text and small glints are bright and grey like metal, and
+        left open they made a present resistor read part empty (Test 2 test2/3
+        R12, R13: crisp "010" on the tests, faint on the golden, MISSING at
+        logits +1.2..+1.8). A bare footprint's land gap is several times wider
+        than the fill, so it stays open."""
+        b = (~self.green(l) & ~self.metal(l)).astype(np.uint8)
+        return cv2.morphologyEx(b, cv2.MORPH_CLOSE, self._fill).astype(np.float32)
 
 
 def colour_class(l_core: np.ndarray) -> str:

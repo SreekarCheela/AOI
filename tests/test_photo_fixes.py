@@ -78,6 +78,25 @@ def test_missing_cutoff_never_tighter_than_single_golden_nor_unbounded():
                             single_golden=False).state == "OK"
 
 
+# ------------------------------------------------ marking holes (2026-09-28, Test 2 R12/R13)
+def test_marking_text_does_not_hollow_a_body_but_a_land_gap_stays_open():
+    p = _part(w=100, h=40)
+    geo = F.Geo(p)
+    GREEN, METAL, BODY = (120, 100, 140), (230, 128, 128), (60, 128, 128)   # Lab
+    gl = np.zeros((geo.H, geo.W, 3), np.float32); gl[:] = GREEN
+    gl[geo.body] = BODY
+    cls = F.Classes(geo, gl, geo.ring)
+    marked = gl.copy()
+    for k in range(4):                       # four thin white strokes of "010"-style text
+        x = geo.bx + 30 + 12 * k
+        marked[geo.by + 12:geo.by + 28, x:x + 3] = METAL
+    assert cls.body_map(marked)[geo.core].mean() == pytest.approx(1.0, abs=0.02)
+    bare = np.zeros_like(gl); bare[:] = GREEN                   # missing part: two lands, green gap
+    bare[geo.by:geo.by + p.h, geo.bx:geo.bx + 25] = METAL
+    bare[geo.by:geo.by + p.h, geo.bx + 75:geo.bx + 100] = METAL
+    assert cls.body_map(bare)[geo.core].mean() < 0.05
+
+
 # ------------------------------------------------ open axis (2026-09-28, Test 2 R18/R10)
 def test_an_axis_the_golden_body_runs_off_is_not_measured():
     p = _part(w=100, h=40)
