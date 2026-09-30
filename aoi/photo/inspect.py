@@ -17,6 +17,8 @@ measured on the wrong pixels.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -103,15 +105,33 @@ def _board_review(res: BoardResult, detail: str) -> BoardResult:
     return res
 
 
+def prefetch(photos: list[Path]) -> Iterator[tuple[Path, Callable[[], np.ndarray]]]:
+    """(photo, load) for each photo, the next one already loading in the
+    background while the caller inspects this one. Decoding a 12 MP HEIC is
+    ~130 ms, most of it in `sips`, off this process's CPU. load() returns the
+    pixels or raises what load_bgr raised, so a bad photo fails in the caller's
+    own try block like any other."""
+    if not photos:
+        return
+    with ThreadPoolExecutor(1, thread_name_prefix="aoi-load") as ex:
+        nxt = ex.submit(load_bgr, photos[0])
+        for i, f in enumerate(photos):
+            cur = nxt
+            if i + 1 < len(photos):
+                nxt = ex.submit(load_bgr, photos[i + 1])
+            yield f, cur.result
+
+
 def inspect(program: Program, image: str | Path, golden: Golden | None = None,
-            calibrators: dict | None = None) -> tuple[BoardResult, np.ndarray | None]:
+            calibrators: dict | None = None, bgr: np.ndarray | None = None
+            ) -> tuple[BoardResult, np.ndarray | None]:
     """BoardResult and the test photo aligned into golden-1 pixels (None if it
-    could not be aligned)."""
+    could not be aligned). `bgr` is the photo already loaded (prefetch)."""
     golden = golden or Golden(program)
     res = BoardResult(image=str(image), program=program.name, program_version=program.version,
                       verdict="REVIEW", px_per_mm=program.px_per_mm,
                       single_golden=program.single_golden, stamp=program.stamp)
-    bgr = load_bgr(image)
+    bgr = load_bgr(image) if bgr is None else bgr
     reg = register.register(golden.keypoints, grey(bgr))
     res.registration = dict(ok=reg.ok, inliers=reg.inliers, matches=reg.matches, fit=reg.fit, note=reg.note)
     if not reg.ok:

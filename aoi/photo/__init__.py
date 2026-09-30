@@ -16,5 +16,5 @@ polarity, offset and skew. Solder quality needs the rings and is out of scope.
     inspect   one test photo -> BoardResult
     gate      capture checks with stated reasons
     record    photo_aoi.db, runs and operator adjudications
-    report    annotated PNG, CSV, one-file HTML
+    report    annotated JPEG, CSV, one-file HTML
 """

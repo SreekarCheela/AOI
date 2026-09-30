@@ -478,6 +478,7 @@ def _fake_inspect_setup(monkeypatch, tmp_path, inspect_fn):
     monkeypatch.setattr(app.photo_inspect, "Golden", lambda prog: SimpleNamespace(bgr=golden))
     monkeypatch.setattr(app.photo_inspect, "inspect", inspect_fn)
     monkeypatch.setattr(app.io, "load_bgr", lambda p: np.full((30, 40, 3), 7, np.uint8))
+    monkeypatch.setattr(app.photo_inspect, "load_bgr", lambda p: np.full((30, 40, 3), 7, np.uint8))
     written = []
 
     def write_all(res, g, shown, out_dir):
@@ -492,7 +493,7 @@ def _fake_inspect_setup(monkeypatch, tmp_path, inspect_fn):
 
 
 def test_bug_d_k_one_bad_photo_never_stops_the_batch_and_unaligned_shows_the_photo(monkeypatch, tmp_path):
-    def inspect(prog, f, golden, calib):
+    def inspect(prog, f, golden, calib, bgr=None):
         name = Path(f).name
         if name == "b.jpg":
             raise cv2.error("simulated OpenCV assertion")

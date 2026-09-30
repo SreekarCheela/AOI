@@ -98,12 +98,12 @@ def test_csv_has_one_row_per_call(tmp_path, result):
 def test_write_all_html_is_one_self_contained_file(tmp_path, images, result):
     golden, test = images
     paths = report.write_all(result, golden, test, tmp_path / "exports")
-    assert paths == {"annotated": tmp_path / "exports" / "board_07_annotated.png",
+    assert paths == {"annotated": tmp_path / "exports" / "board_07_annotated.jpg",
                      "csv": tmp_path / "exports" / "board_07.csv",
                      "html": tmp_path / "exports" / "board_07.html"}
     assert all(p.exists() for p in paths.values())
     assert sorted(p.name for p in (tmp_path / "exports").iterdir()) == \
-        ["board_07.csv", "board_07.html", "board_07_annotated.png"]
+        ["board_07.csv", "board_07.html", "board_07_annotated.jpg"]
 
     doc = paths["html"].read_text(encoding="utf-8")
     assert "http" not in doc

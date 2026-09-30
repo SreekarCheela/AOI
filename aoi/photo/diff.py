@@ -28,12 +28,37 @@ All coordinates returned are full-resolution golden-1 pixels.
 """
 from __future__ import annotations
 
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 from . import gate
+
+# The test side runs on its own small thread pool (cv2 and numpy release the
+# GIL), in row bands and tile wavefronts arranged so every pixel gets the same
+# arithmetic in the same order as one pass over the whole crop: the numbers are
+# bit-identical to the single-threaded form. Separate from features.pool(),
+# which this module's caller may already be running on.
+DIFF_WORKERS = max(1, min(4, os.cpu_count() or 1))
+DIFF_BAND_ROWS = 64                    # rows per band: small enough that a band's planes stay in cache
+_POOL: ThreadPoolExecutor | None = None
+
+
+def _pool() -> ThreadPoolExecutor:
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(DIFF_WORKERS, thread_name_prefix="aoi-diff")
+    return _POOL
+
+
+def _bands(H: int, rows: int | None = None) -> list[tuple[int, int]]:
+    n = max(1, round(H / (rows or DIFF_BAND_ROWS)))
+    cuts = [round(i * H / n) for i in range(n + 1)]
+    return [(cuts[i], cuts[i + 1]) for i in range(n) if cuts[i + 1] > cuts[i]]
 
 # ------------------------------------------------------------------ constants
 # Working copy long side. Half of the 4032 px iPhone frame the method was tuned
@@ -151,15 +176,31 @@ def touch_up(ref_grey: np.ndarray, img_bgr: np.ndarray, ref_grad: np.ndarray | N
     dy = np.zeros_like(dx)
     ok = np.zeros(dx.shape, bool)
     win = cv2.createHanningWindow((TILE, TILE), cv2.CV_32F)
+    # The windowing phaseCorrelate leaves in its inputs is exactly input * win
+    # (float32), and it is the only thing a tile passes on to the tiles after
+    # it. So one cheap pass in row-major order does the flat-tile checks, keeps
+    # a copy of what each tile would have been handed, and applies the window
+    # itself; the correlations run on the pool on those copies as the pass
+    # hands them out, with the same inputs, hence the same answers, as the
+    # one-by-one loop.
+    def tile(i: int, j: int, a: np.ndarray, b: np.ndarray) -> None:
+        (sx, sy), r = cv2.phaseCorrelate(a, b, win)
+        if r > TILE_MIN_RESPONSE and abs(sx) < TILE_MAX_SHIFT and abs(sy) < TILE_MAX_SHIFT:
+            dx[i, j], dy[i, j], ok[i, j] = sx, sy, True
+
+    pool = _pool()
+    jobs = []
     for i, y in enumerate(ys):
         for j, x in enumerate(xs):
             a = A[y:y + TILE, x:x + TILE]
             b = B[y:y + TILE, x:x + TILE]
             if a.std() < TILE_MIN_STD or b.std() < TILE_MIN_STD:
                 continue
-            (sx, sy), r = cv2.phaseCorrelate(a, b, win)
-            if r > TILE_MIN_RESPONSE and abs(sx) < TILE_MAX_SHIFT and abs(sy) < TILE_MAX_SHIFT:
-                dx[i, j], dy[i, j], ok[i, j] = sx, sy, True
+            jobs.append(pool.submit(tile, i, j, a.copy(), b.copy()))
+            np.multiply(a, win, out=a)
+            np.multiply(b, win, out=b)
+    for f in jobs:
+        f.result()
     if not ok.any():
         return img_bgr
     for f in (dx, dy):
@@ -172,41 +213,59 @@ def touch_up(ref_grey: np.ndarray, img_bgr: np.ndarray, ref_grad: np.ndarray | N
     return cv2.remap(img_bgr, gx + fx, gy + fy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
 
-def _norm_lab(bgr: np.ndarray) -> np.ndarray:
-    """Lab with local illumination removed (L over its local mean, a/b minus theirs)."""
+def _norm_lab_planes(bgr: np.ndarray) -> list[np.ndarray]:
+    """_norm_lab as three separate float32 planes, which is how _colour_diff reads them."""
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     L, a, b = cv2.split(lab)
     Lm = cv2.GaussianBlur(L, (0, 0), LAB_SIGMA) + 1.0
     am = cv2.GaussianBlur(a, (0, 0), LAB_SIGMA)
     bm = cv2.GaussianBlur(b, (0, 0), LAB_SIGMA)
-    return np.dstack([100.0 * L / Lm, (a - am) * AB_GAIN, (b - bm) * AB_GAIN])
+    return [100.0 * L / Lm, (a - am) * AB_GAIN, (b - bm) * AB_GAIN]
+
+
+def _norm_lab(bgr: np.ndarray) -> np.ndarray:
+    """Lab with local illumination removed (L over its local mean, a/b minus theirs)."""
+    return np.dstack(_norm_lab_planes(bgr))
+
+
+def _planes(lab: np.ndarray | list[np.ndarray]) -> list[np.ndarray]:
+    return lab if isinstance(lab, list) else [np.ascontiguousarray(lab[..., c]) for c in range(3)]
 
 
 def _shifts(r: int):
     return [(oy, ox) for oy in range(-r, r + 1) for ox in range(-r, r + 1)]
 
 
-def _colour_diff(Gl: np.ndarray, Tl: np.ndarray, r: int = SHIFT_R) -> np.ndarray:
+def _colour_diff(Gl: np.ndarray | list[np.ndarray], Tl: np.ndarray | list[np.ndarray],
+                 r: int = SHIFT_R) -> np.ndarray:
     """min over shifts of T within +-r of the Euclidean Lab distance.
 
-    On separate channel planes: the same additions in the same order as a sum
-    over the interleaved channel axis, so the same numbers, about 3x faster."""
-    H, W = Gl.shape[:2]
-    P = cv2.copyMakeBorder(Tl, r, r, r, r, cv2.BORDER_REPLICATE)
-    Gp = [np.ascontiguousarray(Gl[..., c]) for c in range(3)]
-    Pp = [np.ascontiguousarray(P[..., c]) for c in range(3)]
-    best = None
-    s = np.empty((H, W), np.float32); d = np.empty_like(s)
-    for oy, ox in _shifts(r):
-        sl = (slice(r + oy, r + oy + H), slice(r + ox, r + ox + W))
-        np.subtract(Gp[0], Pp[0][sl], out=s); s *= s
-        for c in (1, 2):
-            np.subtract(Gp[c], Pp[c][sl], out=d); d *= d; s += d
-        if best is None:
-            best = s.copy()
-        else:
-            np.minimum(best, s, out=best)
-    return np.sqrt(best)
+    On separate channel planes (either argument may already be a list of the
+    three): the same additions in the same order as a sum over the interleaved
+    channel axis, so the same numbers, about 3x faster. In row bands on the
+    pool; every pixel is on its own, so a band is exactly the full-crop sum."""
+    Gp = _planes(Gl)
+    H, W = Gp[0].shape
+    Pp = [cv2.copyMakeBorder(t, r, r, r, r, cv2.BORDER_REPLICATE) for t in _planes(Tl)]
+    best = np.empty((H, W), np.float32)
+
+    def band(rows: tuple[int, int]) -> None:
+        y0, y1 = rows
+        s = np.empty((y1 - y0, W), np.float32); d = np.empty_like(s)
+        out = best[y0:y1]
+        for n, (oy, ox) in enumerate(_shifts(r)):
+            sl = (slice(r + oy + y0, r + oy + y1), slice(r + ox, r + ox + W))
+            np.subtract(Gp[0][y0:y1], Pp[0][sl], out=s); s *= s
+            for c in (1, 2):
+                np.subtract(Gp[c][y0:y1], Pp[c][sl], out=d); d *= d; s += d
+            if n == 0:
+                out[:] = s
+            else:
+                np.minimum(out, s, out=out)
+        np.sqrt(out, out=out)
+
+    list(_pool().map(band, _bands(H)))
+    return best
 
 
 def _struct_ref(Gg: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -221,31 +280,57 @@ def _struct_diff(Gg: np.ndarray, Tg: np.ndarray, r: int = SHIFT_R, ref=None) -> 
     """1 - max over shifts (+-r) of local NCC (SSIM-style form) on grey.
 
     Shifting commutes with the box filter, so the test's local mean and variance
-    are computed once and sliced; only the cross term is re-blurred per shift."""
+    are computed once and sliced; only the cross term is re-blurred per shift.
+
+    In row bands on the pool: each band blurs its rows plus NCC_WIN // 2 of the
+    rows either side, which is every row the box filter reads for the band's own
+    rows, so they come out bit-identical to one blur over the whole crop."""
     a, ma, va = _struct_ref(Gg) if ref is None else ref
     b0 = Tg.astype(np.float32)
     H, W = a.shape
     k = (NCC_WIN, NCC_WIN)
+    h = NCC_WIN // 2
     P = cv2.copyMakeBorder(b0, r, r, r, r, cv2.BORDER_REPLICATE)
     mP = cv2.blur(P, k)
     vP = cv2.blur(P * P, k) - mP * mP
-    best = None
-    for oy, ox in _shifts(r):
-        sl = (slice(r + oy, r + oy + H), slice(r + ox, r + ox + W))
-        mb = mP[sl]
-        cov = cv2.blur(a * P[sl], k) - ma * mb
-        c = (2.0 * cov + NCC_C) / (va + vP[sl] + NCC_C)
-        best = c if best is None else np.maximum(best, c, out=best)
-    return 1.0 - best
+    best = np.empty((H, W), np.float32)
+
+    def band(rows: tuple[int, int]) -> None:
+        # (2 cov + C) / (va + vb + C), cov = blur(a b) - ma mb, evaluated in
+        # that order into reused buffers
+        y0, y1 = rows
+        e0, e1 = max(0, y0 - h), min(H, y1 + h)
+        i0, i1 = y0 - e0, y1 - e0
+        ab, mab, vab = a[e0:e1], ma[y0:y1], va[y0:y1]
+        out = best[y0:y1]
+        prod = np.empty((e1 - e0, W), np.float32); blr = np.empty_like(prod)
+        c = np.empty((y1 - y0, W), np.float32); t = np.empty_like(c)
+        for n, (oy, ox) in enumerate(_shifts(r)):
+            sl = (slice(r + oy + y0, r + oy + y1), slice(r + ox, r + ox + W))
+            np.multiply(ab, P[r + oy + e0:r + oy + e1, r + ox:r + ox + W], out=prod)
+            cv2.blur(prod, k, dst=blr)
+            np.multiply(mab, mP[sl], out=t)
+            np.subtract(blr[i0:i1], t, out=c)
+            np.multiply(c, 2.0, out=c); np.add(c, NCC_C, out=c)
+            np.add(vab, vP[sl], out=t); np.add(t, NCC_C, out=t)
+            np.divide(c, t, out=c)
+            if n == 0:
+                out[:] = c
+            else:
+                np.maximum(out, c, out=out)
+        np.subtract(1.0, out, out=out)
+
+    list(_pool().map(band, _bands(H)))
+    return best
 
 
 def _crop_box(valid: np.ndarray) -> tuple[int, int, int, int] | None:
-    ys, xs = np.nonzero(valid)
+    ys, xs = np.flatnonzero(valid.any(axis=1)), np.flatnonzero(valid.any(axis=0))
     if len(ys) == 0:
         return None
     H, W = valid.shape
-    y0 = max(0, int(ys.min()) - CROP_MARGIN); y1 = min(H, int(ys.max()) + 1 + CROP_MARGIN)
-    x0 = max(0, int(xs.min()) - CROP_MARGIN); x1 = min(W, int(xs.max()) + 1 + CROP_MARGIN)
+    y0 = max(0, int(ys[0]) - CROP_MARGIN); y1 = min(H, int(ys[-1]) + 1 + CROP_MARGIN)
+    x0 = max(0, int(xs[0]) - CROP_MARGIN); x1 = min(W, int(xs[-1]) + 1 + CROP_MARGIN)
     return y0, y1, x0, x1
 
 
@@ -265,15 +350,35 @@ class RefMaps:
     def __init__(self, g_s: np.ndarray):
         self.grey = _grey(g_s)
         self.grad = _grad(self.grey)
-        self.lab = _norm_lab(g_s)
+        self.lab = _norm_lab_planes(g_s)
         self.struct = _struct_ref(self.grey)
 
 
 def _pair_maps(g_s: np.ndarray, t_s: np.ndarray, ref: RefMaps | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """(colour, structure) difference of working-res crops, test touched up first."""
+    """(colour, structure) difference of working-res crops, test touched up first.
+
+    The structure half runs on a thread of its own beside the colour half: the
+    colour half's large Gaussian blurs are OpenCV's own parallel work and leave
+    cores idle between them."""
     ref = ref or RefMaps(g_s)
     t_s = touch_up(ref.grey, t_s, ref.grad)
-    return _colour_diff(ref.lab, _norm_lab(t_s)), _struct_diff(ref.grey, _grey(t_s), ref=ref.struct)
+    got: dict = {}
+
+    def struct() -> None:
+        try:
+            got["sm"] = _struct_diff(ref.grey, _grey(t_s), ref=ref.struct)
+        except BaseException as e:       # re-raised on the caller's thread
+            got["err"] = e
+
+    th = threading.Thread(target=struct, name="aoi-diff-struct")
+    th.start()
+    try:
+        cm = _colour_diff(ref.lab, _norm_lab_planes(t_s))
+    finally:
+        th.join()
+    if "err" in got:
+        raise got["err"]
+    return cm, got["sm"]
 
 
 # ------------------------------------------------------------------ public API
@@ -365,12 +470,17 @@ def diff_blobs(golden_bgr: np.ndarray, aligned_bgr: np.ndarray, cover: np.ndarra
     tc = T_COLOUR
     ts = T_STRUCT
     if spread is not None:
-        sp = np.asarray(spread, np.float32)
-        if sp.ndim != 3 or sp.shape[2] != 2:
-            raise ValueError(f"spread map must be (h, w, 2), got {sp.shape}")
-        sp = cv2.resize(sp, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)[y0:y1, x0:x1]
-        tc = np.maximum(T_COLOUR, SPREAD_K * sp[..., 0])
-        ts = np.maximum(T_STRUCT, SPREAD_K * sp[..., 1])
+        # golden-only as well; kept with the spread it came from, so another
+        # spread passed with the same cache is never given this one's thresholds
+        held = cache.get(("thr", box))
+        if held is None or held[0] is not spread:
+            sp = np.asarray(spread, np.float32)
+            if sp.ndim != 3 or sp.shape[2] != 2:
+                raise ValueError(f"spread map must be (h, w, 2), got {sp.shape}")
+            sp = cv2.resize(sp, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)[y0:y1, x0:x1]
+            held = cache[("thr", box)] = (spread, np.maximum(T_COLOUR, SPREAD_K * sp[..., 0]),
+                                          np.maximum(T_STRUCT, SPREAD_K * sp[..., 1]))
+        tc, ts = held[1], held[2]
     rc = cm / tc
     rs = sm / ts
     hit = ((rc > 1.0) & (rs > 1.0) & v_c).astype(np.float32)

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -52,6 +52,24 @@ def pool() -> ThreadPoolExecutor:
     return _POOL
 
 
+# One part can be several times the work of all the rest (U1, a 296 x 178 px IC
+# on the 2026-09-28 fixture: ~380 ms of a board's ~1.2 s), and then it alone sets
+# the board's time however many cores there are. Its independent pieces (shift
+# chunks of the colour-change median, angles of the placement search) run on a
+# small pool of their own; each piece is computed exactly as before and the
+# results are combined in the same order, so the numbers do not change.
+INNER_WORKERS = max(1, min(4, os.cpu_count() or 1))
+INNER_PART_PX = 20_000          # box area at or above which a part is split (U1: 52,700; next: 10,100)
+_INNER: ThreadPoolExecutor | None = None
+
+
+def inner() -> ThreadPoolExecutor:
+    global _INNER
+    if _INNER is None:
+        _INNER = ThreadPoolExecutor(INNER_WORKERS, thread_name_prefix="aoi-inner")
+    return _INNER
+
+
 def measure_all(ref: "Frame", img: "Frame", parts: list[Part], **kw) -> dict[str, dict]:
     """measure() for every part, in parallel, keyed by refdes in `parts` order."""
     return dict(zip([p.refdes for p in parts], pool().map(lambda p: measure(ref, img, p, **kw), parts)))
@@ -70,6 +88,9 @@ class Frame:
     bgr: np.ndarray        # uint8, padded
     grey: np.ndarray       # float32, padded
     cover: np.ndarray      # uint8, 255 where the photo has real pixels
+    # per-part golden work (GoldenSide), filled on the first board measured
+    # against this frame and reused for every board after it
+    cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def of(cls, bgr: np.ndarray, cover: np.ndarray | None = None) -> "Frame":
@@ -156,9 +177,11 @@ def _grad(g: np.ndarray) -> np.ndarray:
 
 
 # ------------------------------------------------------------ alignment
-def local_shift(geo: Geo, ref: Frame, img: Frame, ring: np.ndarray | None = None) -> tuple[float, float, float]:
-    """Residual shift of the board round the part (body masked out), and match quality."""
-    tpl = _grad(geo.cut(ref.grey))
+def local_shift(geo: Geo, ref: Frame, img: Frame, ring: np.ndarray | None = None,
+                tpl: np.ndarray | None = None) -> tuple[float, float, float]:
+    """Residual shift of the board round the part (body masked out), and match
+    quality. `tpl` is the golden window's gradient, when already computed."""
+    tpl = _grad(geo.cut(ref.grey)) if tpl is None else tpl
     big = _grad(geo.cut(img.grey, extra=SEARCH))
     res = cv2.matchTemplate(big, tpl, cv2.TM_CCOEFF_NORMED, mask=geo.ring if ring is None else ring)
     res = np.nan_to_num(res, nan=-1.0, posinf=-1.0, neginf=-1.0)
@@ -167,14 +190,23 @@ def local_shift(geo: Geo, ref: Frame, img: Frame, ring: np.ndarray | None = None
     return sx - SEARCH, sy - SEARCH, float(v)
 
 
-def normalise(t_win: np.ndarray, g_win: np.ndarray, ring: np.ndarray) -> np.ndarray:
-    """Map the test window's per-channel levels onto the golden's, from the ring
-    only: a missing or moved part must not drag the mapping toward itself."""
+def ring_levels(win: np.ndarray, ring: np.ndarray) -> list[np.ndarray]:
+    """Per-channel 10/50/90th percentiles of a window over the ring."""
     m = ring > 0
+    return [np.percentile(win[..., c][m], (10, 50, 90)) for c in range(3)]
+
+
+def normalise(t_win: np.ndarray, g_win: np.ndarray, ring: np.ndarray,
+              g_levels: list[np.ndarray] | None = None) -> np.ndarray:
+    """Map the test window's per-channel levels onto the golden's, from the ring
+    only: a missing or moved part must not drag the mapping toward itself.
+    `g_levels` is ring_levels(g_win, ring), when already computed."""
+    m = ring > 0
+    g_levels = ring_levels(g_win, ring) if g_levels is None else g_levels
     out = np.empty(t_win.shape, np.float32)
     for c in range(3):
         tq = np.percentile(t_win[..., c][m], (10, 50, 90))
-        gq = np.percentile(g_win[..., c][m], (10, 50, 90))
+        gq = g_levels[c]
         k, b = np.linalg.lstsq(np.vstack([tq, np.ones(3)]).T, gq, rcond=None)[0]
         out[..., c] = t_win[..., c] * k + b
     return out
@@ -252,6 +284,7 @@ def _orient(g: np.ndarray, geo: Geo) -> float:
 _W2 = W_LAB ** 2
 DE_EXHAUSTIVE = 49              # shift grids up to 7x7 are searched exhaustively
 DE_KEEP = 3                     # coarse candidates refined at full resolution
+DE_CHUNK = 16                   # shifts per pass in _dE_many (a large IC has 625)
 
 
 def _dE_at(g: np.ndarray, t: np.ndarray, geo: Geo, ox: int, oy: int, step: int = 1) -> float:
@@ -259,20 +292,44 @@ def _dE_at(g: np.ndarray, t: np.ndarray, geo: Geo, ox: int, oy: int, step: int =
 
 
 def _dE_many(g: np.ndarray, t: np.ndarray, geo: Geo, shifts: list[tuple[int, int]], step: int = 1) -> list[float]:
-    """_dE_at for several shifts in one numpy pass: the same numbers, without a
-    Python round trip (and the GIL) per shift."""
+    """_dE_at for several shifts, DE_CHUNK at a time in place: the same numbers
+    to the bit as one np.median over all of them, at under half the time. The
+    whole stack was ~100 MB of temporaries on a large IC (625 shifts), and U1
+    alone then set the board's time.
+
+    Same float32 operations in the same order: d = t - g, (d * d) * W2, the
+    three channels summed left to right (what .sum(-1) does over 3), sqrt, and
+    the median as np.median takes it (partition; mean of the middle two)."""
     p = geo.p
     if not shifts:
         return []
     gw = g[geo.by:geo.by + p.h:step, geo.bx:geo.bx + p.w:step]
-    tw = np.stack([t[geo.by + oy:geo.by + oy + p.h:step, geo.bx + ox:geo.bx + ox + p.w:step]
-                   for ox, oy in shifts])
-    d = tw - gw
-    e = np.sqrt((d * d * _W2).sum(-1)).reshape(len(shifts), -1)
-    return [float(v) for v in np.median(e, axis=1)]
+    chunks = [shifts[i:i + DE_CHUNK] for i in range(0, len(shifts), DE_CHUNK)]
+
+    def one(sh: list[tuple[int, int]]) -> list[float]:
+        d = np.stack([t[geo.by + oy:geo.by + oy + p.h:step, geo.bx + ox:geo.bx + ox + p.w:step]
+                      for ox, oy in sh])
+        d -= gw
+        np.multiply(d, d, out=d)
+        d *= _W2
+        e = d[..., 0] + d[..., 1]
+        e += d[..., 2]
+        np.sqrt(e, out=e)
+        e = e.reshape(len(sh), -1)
+        k = e.shape[1] // 2
+        if e.shape[1] % 2:
+            e.partition(k, axis=1)
+            m = e[:, k]
+        else:
+            e.partition([k - 1, k], axis=1)
+            m = (e[:, k - 1] + e[:, k]) / np.float32(2)
+        return [float(v) for v in m]
+
+    big = len(chunks) > 1 and p.w * p.h >= INNER_PART_PX
+    return [v for vs in (inner().map(one, chunks) if big else map(one, chunks)) for v in vs]
 
 
-def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo) -> float:
+def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo, g: np.ndarray | None = None) -> float:
     """Median colour change over the body box, at the best small integer shift.
 
     Coarse to fine: every second shift on every second pixel first, then the
@@ -282,7 +339,8 @@ def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo) -> float:
     lands on the exhaustive minimum (checked on the 2026-09-25 fixture) at about
     a tenth of the cost. Small grids are still searched exhaustively."""
     p = geo.p
-    g = cv2.GaussianBlur(gl, (0, 0), 1.5); t = cv2.GaussianBlur(tl, (0, 0), 1.5)
+    g = cv2.GaussianBlur(gl, (0, 0), 1.5) if g is None else g      # g: gl already blurred
+    t = cv2.GaussianBlur(tl, (0, 0), 1.5)
     s = max(2, int(0.08 * max(p.w, p.h)))
     if (2 * s + 1) ** 2 <= DE_EXHAUSTIVE:
         return min(_dE_many(g, t, geo, [(ox, oy) for oy in range(-s, s + 1) for ox in range(-s, s + 1)]))
@@ -336,15 +394,22 @@ PLACE_KEEP = 3                  # coarse candidates refined at full resolution
 PLACE_MIN_HALF = 12             # templates under 2x this on a side are searched at full resolution only
 
 
-def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tuple[float, float, float]:
+def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0,
+          gc: dict | None = None) -> tuple[float, float, float]:
     """Shift and turn carrying the golden body map onto the test one.
 
     NaN for all three when either map is flat round the part (all body or no
     body at all): there is no edge to match, and the minimum of a flat
-    difference is wherever the search happened to start, not a placement."""
+    difference is wherever the search happened to start, not a placement.
+
+    `gc` keeps the golden side (blurred map, rotated templates) between calls
+    with the same Bg: it depends on nothing in the test photo."""
     p = geo.p
+    gc = {} if gc is None else gc
     sig = max(1.0, 0.06 * min(p.w, p.h))
-    g = cv2.GaussianBlur(Bg, (0, 0), sig); t = cv2.GaussianBlur(Bt, (0, 0), sig)
+    if "g" not in gc:
+        gc["g"] = cv2.GaussianBlur(Bg, (0, 0), sig)
+    g = gc["g"]; t = cv2.GaussianBlur(Bt, (0, 0), sig)
     e = int(0.35 * min(p.w, p.h)) + 4
     y0, y1, x0, x1 = geo.by - e, geo.by + p.h + e, geo.bx - e, geo.bx + p.w + e
     cx, cy = geo.bx + p.w / 2.0, geo.by + p.h / 2.0
@@ -357,11 +422,14 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tu
 
     def tpl_at(src: np.ndarray, a: float, k: float) -> np.ndarray:
         # only the template's own rectangle is rotated, not the whole window;
-        # k = 0.5 on the half-resolution maps
-        R = cv2.getRotationMatrix2D((cx * k, cy * k), a, 1.0)
-        R[0, 2] -= x0 * k; R[1, 2] -= y0 * k
-        return cv2.warpAffine(src, R, (int((x1 - x0) * k), int((y1 - y0) * k)), flags=cv2.INTER_LINEAR,
-                              borderMode=cv2.BORDER_CONSTANT)
+        # k = 0.5 on the half-resolution maps (src is then gc["g2"])
+        key = (round(float(a), 6), k)
+        if key not in gc:
+            R = cv2.getRotationMatrix2D((cx * k, cy * k), a, 1.0)
+            R[0, 2] -= x0 * k; R[1, 2] -= y0 * k
+            gc[key] = cv2.warpAffine(src, R, (int((x1 - x0) * k), int((y1 - y0) * k)), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT)
+        return gc[key]
 
     seen: dict[float, tuple] = {}
 
@@ -390,13 +458,18 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tu
     # the 0.5 deg steps at full resolution, translation searched only
     # +-PLACE_NEAR px round where the coarse step put the body. A minimum on the
     # edge of that window means the guess was off: that angle is searched in full.
-    g2 = cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    if "g2" not in gc:
+        gc["g2"] = cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    g2 = gc["g2"]
     t2 = cv2.resize(tw, (tw.shape[1] // 2, tw.shape[0] // 2), interpolation=cv2.INTER_AREA)
-    coarse = []
-    for a in coarse_angles:
+    run = inner().map if p.w * p.h >= INNER_PART_PX else map
+
+    def coarse_at(a: float) -> tuple:
         tpl = tpl_at(g2, a, 0.5)
         v, _, loc, _ = cv2.minMaxLoc(cv2.matchTemplate(t2, tpl, cv2.TM_SQDIFF) / tpl.size)
-        coarse.append((v, float(a), loc))
+        return (v, float(a), loc)
+
+    coarse = list(run(coarse_at, coarse_angles))
     ry, rx = tw.shape[0] - th, tw.shape[1] - tw_          # largest valid location
 
     def near(a: float, c_loc: tuple[int, int]):
@@ -414,12 +487,12 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0) -> tu
     # the PLACE_KEEP best coarse angles each refined: a body map with two near
     # equal minima must not be settled by half-resolution rounding
     fine: dict[float, tuple] = {}
-    for _, c_best, c_loc in sorted(coarse)[:PLACE_KEEP]:
-        for a in np.arange(c_best - 2.0, c_best + 2.0 + 1e-6, 0.5):
-            r = near(float(a), c_loc)
-            k = round(float(a), 6)
-            if k not in fine or r[0] < fine[k][0]:
-                fine[k] = r
+    jobs = [(float(a), c_loc) for _, c_best, c_loc in sorted(coarse)[:PLACE_KEEP]
+            for a in np.arange(c_best - 2.0, c_best + 2.0 + 1e-6, 0.5)]
+    for (a, _), r in zip(jobs, run(lambda j: near(*j), jobs)):     # merged in search order
+        k = round(a, 6)
+        if k not in fine or r[0] < fine[k][0]:
+            fine[k] = r
     best = min(fine, key=lambda a: fine[a][0])
     _, res, loc, (lx0, ly0), inside = fine[best]
     if not inside:
@@ -667,52 +740,98 @@ def golden_outline(ref: Frame, p: Part) -> dict:
                 outline_axis=outline_axis(thin, geo), body_axis=rg["axis"] if rg else None, body_g=rg)
 
 
+class GoldenSide:
+    """Everything measure() reads from the golden window alone, for one part.
+
+    None of it depends on the test photo, so it is built on the first board and
+    kept in the golden Frame's cache for every board after it. The one input
+    that can depend on the test is the ring (coverage trims it near the photo
+    edge); only a full ring is cached, a trimmed one gets a fresh GoldenSide."""
+
+    def __init__(self, geo: Geo, ref: Frame, ring: np.ndarray):
+        p = geo.p
+        self.geo = geo
+        self.grad = _grad(geo.cut(ref.grey))
+        self.win = geo.cut(ref.bgr).astype(np.float32)
+        self.levels = ring_levels(self.win, ring)
+        self.lab = lab(self.win)
+        self.cls = Classes(geo, self.lab, ring)
+        self.B = self.cls.body_map(self.lab)
+        self.grey = cv2.cvtColor(np.clip(self.win, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        self.core_body = float(self.B[geo.core].mean())
+        self.gap = _gap_contrast(cv2.GaussianBlur(self.lab, (0, 0), 1.0), geo)
+        self.lab_blur = cv2.GaussianBlur(self.lab, (0, 0), 1.5)
+        self.orient = _orient(self.grey, geo)
+        self.open_axes = open_axes(geo, self.B)
+        self.rect = body_rect(self.B, geo)
+        self.colour = colour_class(self.lab[geo.core])
+        self.hp = highpass(patch_in_golden_frame(self.grey, geo, 0, 0, 0), p)
+        self.hp180 = np.rot90(self.hp, 2)
+        self.stripe = (stripe_end(highpass(patch_in_golden_frame(self.grey, geo, 0, 0, 0,
+                                                                 inset_long=STRIPE_INSET_LONG), p), p)
+                       if p.polarized and p.type in STRIPE_TYPES else None)
+        self.place: dict = {}                  # place()'s blurred map and rotated templates
+
+
+def _golden_side(ref: Frame, p: Part, img: Frame) -> tuple[GoldenSide | None, np.ndarray, str]:
+    """(golden side, ring, why not in view); None when the part is not in view."""
+    key = (p.refdes, p.x, p.y, p.w, p.h, p.type, p.polarized)
+    gs = ref.cache.get(key)
+    geo = gs.geo if gs is not None else Geo(p)
+    ok, ring, why = coverage(geo, ref, img)
+    if not ok:
+        return None, ring, why
+    if ring is not geo.ring:                   # trimmed at the photo edge: not reusable
+        return GoldenSide(geo, ref, ring), ring, ""
+    if gs is None:
+        gs = ref.cache[key] = GoldenSide(geo, ref, ring)
+    return gs, ring, ""
+
+
 def measure(ref: Frame, img: Frame, p: Part, *, is_golden: bool = False) -> dict:
     """Every raw number the judge needs for part `p`, test `img` against golden `ref`.
 
     dx, dy, dth are NaN when the body maps give nothing to match (see place)."""
-    geo = Geo(p)
     out: dict = {}
-    ok, ring, why = coverage(geo, ref, img)
-    if not ok:
+    gs, ring, why = _golden_side(ref, p, img)
+    if gs is None:
         out.update(in_view=False, view_note=why)
         return out
+    geo, cls = gs.geo, gs.cls
     out["in_view"] = True
-    sx, sy, q = (0.0, 0.0, 1.0) if is_golden else local_shift(geo, ref, img, ring)
+    sx, sy, q = (0.0, 0.0, 1.0) if is_golden else local_shift(geo, ref, img, ring, gs.grad)
     out.update(local_dx=sx, local_dy=sy, local_q=q)
 
-    g_win = geo.cut(ref.bgr).astype(np.float32)
+    g_win = gs.win
     t_raw = _cut_float(geo, img.bgr, sx, sy)
     out["glare"] = float((t_raw[geo.body].max(-1) >= config.PHOTO_GLARE_LEVEL).mean())
-    t_win = t_raw if is_golden else normalise(t_raw, g_win, ring)
-    gl, tl = lab(g_win), lab(t_win)
-    cls = Classes(geo, gl, ring)
-    Bg, Bt = cls.body_map(gl), cls.body_map(tl)
+    t_win = t_raw if is_golden else normalise(t_raw, g_win, ring, gs.levels)
+    gl, tl = gs.lab, lab(t_win)
+    Bg, Bt = gs.B, cls.body_map(tl)
 
     # presence
-    g_grey = cv2.cvtColor(np.clip(g_win, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
     t_grey = cv2.cvtColor(np.clip(t_win, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
-    fg, ft = float(Bg[geo.core].mean()), float(Bt[geo.core].mean())
-    gap_g, gap_t = _gap_contrast(cv2.GaussianBlur(gl, (0, 0), 1.0), geo), _gap_contrast(cv2.GaussianBlur(tl, (0, 0), 1.0), geo)
-    out.update(dE_med=_dE_med(gl, tl, geo),
-               orient_drop=_orient(g_grey, geo) - _orient(t_grey, geo),
+    fg, ft = gs.core_body, float(Bt[geo.core].mean())
+    gap_g, gap_t = gs.gap, _gap_contrast(cv2.GaussianBlur(tl, (0, 0), 1.0), geo)
+    out.update(dE_med=_dE_med(gl, tl, geo, gs.lab_blur),
+               orient_drop=gs.orient - _orient(t_grey, geo),
                phys_ratio=ft / max(fg, 1e-3),
                gap_ratio=float(np.log(max(gap_t, 1e-3) / max(gap_g, 1e-3))),
                core_green=float(cls.green(tl)[geo.core].mean()))
 
     # placement
-    dx, dy, dth = place(geo, Bg, Bt)
+    dx, dy, dth = place(geo, Bg, Bt, gc=gs.place)
     # an axis the golden body gives no edge along is not measured: its shift
     # is the slide along a strip, not a placement (open_axes). dx, dy stay raw
     # for board_noise, whose sigma sets every part's offset limit; the judge
     # and the marking sample below drop the open component.
-    op = open_axes(geo, Bg)
+    op = gs.open_axes
     out.update(dx=dx, dy=dy, dth=dth, open_axes=op)
     if not np.isnan(dx):
         dx, dy = (0.0 if "x" in op else dx), (0.0 if "y" in op else dy)
-    rg, rt = body_rect(Bg, geo), body_rect(Bt, geo)
+    rg, rt = gs.rect, body_rect(Bt, geo)
     out["body_g"], out["body_t"] = rg, rt
-    out["colour_g"], out["colour_t"] = colour_class(gl[geo.core]), colour_class(tl[geo.core])
+    out["colour_g"], out["colour_t"] = gs.colour, colour_class(tl[geo.core])
 
     # skew against the silkscreen
     thin = silk_mask(tl, geo, cls)
@@ -727,14 +846,13 @@ def measure(ref: Frame, img: Frame, p: Part, *, is_golden: bool = False) -> dict
     # marking and polarity, test body resampled into the golden frame (in place
     # when the placement could not be measured)
     placed = not np.isnan(dx)
-    hp_g = highpass(patch_in_golden_frame(g_grey, geo, 0, 0, 0), p)
+    hp_g = gs.hp
     hp_t = highpass(patch_in_golden_frame(t_grey, geo, *((dx, dy, dth) if placed else (0.0, 0.0, 0.0))), p)
-    out.update(mark_s0=ncc(hp_t, hp_g), mark_s180=ncc(hp_t, np.rot90(hp_g, 2)),
-               turn_margin=turn_margin(hp_t, hp_g))
-    if p.polarized and p.type in STRIPE_TYPES:
+    s0, s180 = ncc(hp_t, hp_g), ncc(hp_t, gs.hp180)
+    out.update(mark_s0=s0, mark_s180=s180, turn_margin=s0 - s180)
+    if gs.stripe is not None:
         d = (dx, dy, dth) if placed else (0.0, 0.0, 0.0)
-        out.update(stripe_g=stripe_end(highpass(patch_in_golden_frame(g_grey, geo, 0, 0, 0,
-                                                                      inset_long=STRIPE_INSET_LONG), p), p),
+        out.update(stripe_g=gs.stripe,
                    stripe_t=stripe_end(highpass(patch_in_golden_frame(t_grey, geo, *d,
                                                                       inset_long=STRIPE_INSET_LONG), p), p))
     return out

@@ -1,4 +1,4 @@
-"""What a photo-mode run leaves behind: an annotated PNG, a CSV, one HTML file.
+"""What a photo-mode run leaves behind: an annotated JPEG, a CSV, one HTML file.
 
 The HTML is one file with everything inside it -- CSS inline, images as base64
 data URIs, no fonts, scripts or stylesheets fetched from anywhere. It gets
@@ -39,6 +39,11 @@ VERDICT_SEVERITY = {"PASS": "OK", "FAIL": "FAIL", "REVIEW": "REVIEW"}
 HTML_BOARD_SIDE = 2000      # long side of the board image embedded in the HTML
 HTML_CROP_SIDE = 240        # long side of each crop thumbnail
 JPEG_QUALITY = 85
+# The full-size annotated board. JPEG, not PNG: a 12 MP PNG took 334 ms to write
+# (zlib level 1) and 10 MB of disk per board, a third of the whole per-board
+# time; JPEG at this quality takes ~20 ms and ~1 MB, and the operator looks at
+# boxes and labels on it, not at single pixels. The measurements never read it.
+ANNOTATED_QUALITY = 92
 
 CSV_FIELDS = ("image", "refdes", "type", "package", "check", "state", "severity",
               "score", "calibrated", "unvalidated", "detail", "dx_px", "dy_px",
@@ -347,13 +352,12 @@ def write_all(result: BoardResult, golden_bgr: np.ndarray, aligned_test_bgr: np.
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(result.image).stem
-    paths = {"annotated": out_dir / f"{stem}_annotated.png",
+    paths = {"annotated": out_dir / f"{stem}_annotated.jpg",
              "csv": out_dir / f"{stem}.csv",
              "html": out_dir / f"{stem}.html"}
 
     annotated = annotate(aligned_test_bgr, result)
-    # fastest zlib level: the same pixels, ~10% larger, about half the time on a 12 MP board
-    if not cv2.imwrite(str(paths["annotated"]), annotated, [cv2.IMWRITE_PNG_COMPRESSION, 1]):
+    if not cv2.imwrite(str(paths["annotated"]), annotated, [cv2.IMWRITE_JPEG_QUALITY, ANNOTATED_QUALITY]):
         raise OSError(f"could not write {paths['annotated']}")
     # Crops come from the photo, not the annotated copy: an operator judging a
     # part needs to see the part, not the box drawn over it.

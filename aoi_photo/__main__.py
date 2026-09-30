@@ -92,9 +92,9 @@ def cmd_inspect(a: argparse.Namespace) -> int:
                                  prog.px_per_mm, prog.single_golden)
         calib = {c: f for c in ("missing", "offset", "skew", "polarity", "tombstone", "wrong_part")
                  if (f := judge.calibrate(rec.labels(c))) is not None}
-        for f in photos:
+        for f, load in I.prefetch(photos):
             t0 = time.time()
-            res, aligned = I.inspect(prog, f, golden, calib)
+            res, aligned = I.inspect(prog, f, golden, calib, bgr=load())
             run_id = rec.save_run(res, pv)
             paths = report.write_all(res, golden.bgr, aligned if aligned is not None else golden.bgr * 0, out)
             rec.set_report(run_id, paths["annotated"], paths["html"])

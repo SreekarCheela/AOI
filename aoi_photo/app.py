@@ -945,6 +945,11 @@ def inspect_worker(q: queue.Queue, prog: program.Program, photos: list[Path], db
                    out_dir: Path) -> None:
     """`python -m aoi_photo inspect`'s loop, one queue message per board.
 
+    Three stages overlap: the next photo loads (inspect.prefetch) while this one
+    is inspected, and the last one's record and report are written on a second
+    thread meanwhile. Messages still leave in photo order, since every one goes
+    through that second thread.
+
     One bad photo never stops the batch: whatever it raises goes into its own
     row and the loop moves on."""
     try:
@@ -966,23 +971,46 @@ def inspect_worker(q: queue.Queue, prog: program.Program, photos: list[Path], db
         except Exception as e:                    # noqa: BLE001
             q.put(("inspect_fatal", error_text(e)))
             return
-        for i, f in enumerate(photos):
-            t0 = time.perf_counter()
-            try:
-                res, aligned = photo_inspect.inspect(prog, f, golden, calib)
-                run_id = rec.save_run(res, pv)
-                # No parts judged (could not align, wrong distance): the report
-                # shows the photo as shot, with the reason on it.
-                usable = aligned if aligned is not None and res.parts else None
-                shown = usable if usable is not None else _photo_or_blank(Path(f), golden.bgr)
-                paths = report.write_all(res, golden.bgr, shown, out_dir)
-                rec.set_report(run_id, paths["annotated"], paths["html"])
-            except Exception as e:                # noqa: BLE001
-                if not isinstance(e, (io.PhotoError, OSError, ValueError)):
-                    traceback.print_exc()
-                q.put(("inspect_error", i, error_text(e)))
-                continue
-            q.put(("inspect_row", i, run_id, res, paths, usable, time.perf_counter() - t0))
+
+    held: dict[str, record.Record] = {}           # the writer thread's own connection
+
+    def failed(i: int, e: Exception) -> None:
+        if not isinstance(e, (io.PhotoError, OSError, ValueError)):
+            traceback.print_exception(e)
+        q.put(("inspect_error", i, error_text(e)))
+
+    def finish(i: int, f: Path, res: BoardResult, aligned: np.ndarray | None, t0: float) -> None:
+        try:
+            rec = held.get("rec") or held.setdefault("rec", record.Record(db))
+            run_id = rec.save_run(res, pv)
+            # No parts judged (could not align, wrong distance): the report
+            # shows the photo as shot, with the reason on it.
+            usable = aligned if aligned is not None and res.parts else None
+            shown = usable if usable is not None else _photo_or_blank(Path(f), golden.bgr)
+            paths = report.write_all(res, golden.bgr, shown, out_dir)
+            rec.set_report(run_id, paths["annotated"], paths["html"])
+        except Exception as e:                    # noqa: BLE001
+            failed(i, e)
+            return
+        q.put(("inspect_row", i, run_id, res, paths, usable, time.perf_counter() - t0))
+
+    def close() -> None:
+        if "rec" in held:
+            held.pop("rec").close()
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(1, thread_name_prefix="aoi-report") as writer:
+        try:
+            for i, (f, load) in enumerate(photo_inspect.prefetch(photos)):
+                t0 = time.perf_counter()
+                try:
+                    res, aligned = photo_inspect.inspect(prog, f, golden, calib, bgr=load())
+                except Exception as e:            # noqa: BLE001
+                    writer.submit(failed, i, e)
+                    continue
+                writer.submit(finish, i, f, res, aligned, t0)
+        finally:
+            writer.submit(close)                  # sqlite: closed on the thread that opened it
 
 
 # ======================================================================= Tk

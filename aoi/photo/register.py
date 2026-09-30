@@ -13,7 +13,9 @@ Measured on the 2026-09-25 iPhone photos: 578-665 inliers, overlap 0.92-0.93, an
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -24,6 +26,8 @@ from .. import config
 REG_MAX_SIDE = 1600
 REG_MIN_INLIERS = 25
 REG_MIN_OVERLAP_NCC = config.REG_MIN_OVERLAP_NCC
+MATCH_CHUNKS = 8                  # 8000 SIFT features -> 1000 query rows per matrix product
+_MATCH_POOL: ThreadPoolExecutor | None = None
 
 
 def _small(img: np.ndarray) -> tuple[np.ndarray, float]:
@@ -54,6 +58,12 @@ class Keypoints:
     k: float
     kp: tuple
     desc: np.ndarray | None
+    _match: tuple | None = field(default=None, repr=False)   # (desc transposed, |desc|^2), for _knn2
+
+    def match_side(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._match is None:
+            self._match = (np.ascontiguousarray(self.desc.T), (self.desc * self.desc).sum(1))
+        return self._match
 
 
 def keypoints(grey_img: np.ndarray) -> Keypoints:
@@ -75,13 +85,15 @@ def register(ref: np.ndarray | Keypoints, img: np.ndarray) -> Registration:
     if dr is None or di is None or len(kr) < REG_MIN_INLIERS or len(ki) < REG_MIN_INLIERS:
         return Registration(None, 0, 0, "too few features -- is the photo in focus?")
 
-    knn = cv2.BFMatcher(cv2.NORM_L2).knnMatch(di, dr, k=2)
-    good = [m for m, n in (p for p in knn if len(p) == 2) if m.distance < 0.75 * n.distance]
+    if len(kr) < 2:
+        return Registration(None, 0, 0, "too few features -- is the photo in focus?")
+    idx, dist = _knn2(di, rk)
+    good = np.nonzero(dist[:, 0] < 0.75 * dist[:, 1])[0]
     if len(good) < REG_MIN_INLIERS:
         return Registration(None, 0, len(good),
                             f"only {len(good)} feature matches -- is this the same board?")
-    src = np.float32([ki[m.queryIdx].pt for m in good])
-    dst = np.float32([kr[m.trainIdx].pt for m in good])
+    src = np.float32([ki[q].pt for q in good])
+    dst = np.float32([kr[t].pt for t in idx[good, 0]])
     H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
     n_in = int(mask.sum()) if mask is not None else 0
     if H is None or n_in < REG_MIN_INLIERS:
@@ -106,6 +118,35 @@ def register(ref: np.ndarray | Keypoints, img: np.ndarray) -> Registration:
     if not 0.25 < det < 4.0:
         return Registration(None, n_in, len(good), f"implausible alignment (area scale {det:.2f})")
     return Registration(H, n_in, len(good), fit=fit)
+
+
+def _knn2(di: np.ndarray, rk: Keypoints) -> tuple[np.ndarray, np.ndarray]:
+    """Two nearest reference descriptors per query descriptor, and their L2
+    distances: cv2.BFMatcher(NORM_L2).knnMatch(k=2), 3-4x faster.
+
+    |a|^2 + |b|^2 - 2ab as one matrix product per chunk of rows, on threads.
+    OpenCV's SIFT descriptors are whole numbers scaled to norm 512, so every
+    product and partial sum is an integer below 2^24 and float32 holds it
+    exactly: the distances are BFMatcher's to the bit, and so is the ratio test
+    (checked on the 2026-09-28 fixture: same matches, same distances)."""
+    global _MATCH_POOL
+    if _MATCH_POOL is None:
+        _MATCH_POOL = ThreadPoolExecutor(min(MATCH_CHUNKS, os.cpu_count() or 1), thread_name_prefix="aoi-match")
+    rT, b2 = rk.match_side()
+
+    def chunk(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        D = q @ rT
+        D *= -2.0
+        D += b2
+        r = np.arange(len(q))
+        i1 = D.argmin(1); v1 = D[r, i1].copy()
+        D[r, i1] = np.inf
+        i2 = D.argmin(1); v2 = D[r, i2]
+        a2 = (q * q).sum(1)
+        return np.stack([i1, i2], 1), np.sqrt(np.maximum(np.stack([v1 + a2, v2 + a2], 1), 0.0))
+
+    parts = list(_MATCH_POOL.map(chunk, np.array_split(di, MATCH_CHUNKS)))
+    return np.concatenate([p[0] for p in parts]), np.concatenate([p[1] for p in parts])
 
 
 def _overlap_ncc(a: np.ndarray, b: np.ndarray, valid: np.ndarray) -> float:

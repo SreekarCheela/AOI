@@ -175,7 +175,7 @@ python -m aoi_photo stats
 
 `parts.csv` has these columns: `refdes,x,y,w,h,type,package,polarized,marked_end`,
 in golden-1 pixels. Reports go to `out/photo_runs/<program>/<time>/`: an
-annotated PNG, a CSV, and a one-file HTML with no external assets. Operator
+annotated JPEG, a CSV, and a one-file HTML with no external assets. Operator
 labels go to `out/photo_aoi.db`.
 
 **Measured on the only real data so far.** The 2026-09-25 iPhone shoot of
