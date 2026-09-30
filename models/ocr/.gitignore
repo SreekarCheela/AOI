@@ -1,0 +1,3 @@
+# model weights are installed per machine, not committed (~108 MB)
+*.onnx
+*.part

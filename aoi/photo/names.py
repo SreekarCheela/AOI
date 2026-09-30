@@ -2,8 +2,9 @@
 
 A board already carries every part's name: R12 printed beside resistor 12, D4
 beside diode 4. Teach reads them off golden 1 with an offline OCR (RapidOCR:
-the PP-OCR detector, angle classifier and recogniser as ONNX models, run on
-onnxruntime; nothing is downloaded at run time) and gives each part box the
+PP-OCR detector and recognisers as ONNX models on onnxruntime, the same on
+macOS, Linux x86 and ARM64; the model files are pinned in MODELS and never
+downloaded at run time) and gives each part box the
 label that belongs to it. The name's letter says what the part is, and that
 says whether it can go in backwards, so no part needs marking by hand
 (designator letters: ASME Y14.44 / IEEE 315; the FPIC PCB dataset uses the
@@ -29,13 +30,18 @@ in-sample for this board.
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
 
+from .. import config
 from . import gate
 from .model import Part
 
@@ -68,7 +74,6 @@ GATE = 6.0                      # max gap, in character heights, name to box
 LOCAL_SCALE = 1.0               # second read: neighbourhood at this scale
 LOCAL_ALL = False               # close-up of every box, not only the unnamed
 LOCAL_MAX_MARGIN = 4.0          # close-up margin cap, character heights
-LOCAL_READERS = None            # None: every recogniser; ("vision",) or ("rapid",) for one
 LOCAL_MARGIN = 2.5              # neighbourhood = box grown this x its long side
 
 
@@ -114,13 +119,58 @@ def type_of(name: str) -> tuple[str, bool]:
 
 
 # ------------------------------------------------------------------ OCR
-# Two recognisers, because each misses what the other reads: on the fixture
-# PP-OCR (RapidOCR) read C4, C5, R2, R3, R6 that Apple Vision did not, and Vision
-# read R8 (PP-OCR: "R6"), R12, R13, C7, C8. Every reading is a vote.
-_RAPID = None
+# PP-OCR (PP-OCRv6, via RapidOCR on onnxruntime), identically on every platform.
+# Apple Vision was a second recogniser on macOS until 2026-09-30; the production
+# machine is not a Mac, and this set matches it without it.
+#
+# Naming accuracy on 4 goldens with verified names (2026-09-25 Golden.jpg and
+# 2026-09-28 golden1-3, 145 boxes; in-sample: these boards shaped the rules),
+# right / wrong / unnamed, naming seconds per golden on an M5 under load:
+#     PP-OCR small + Apple Vision (the old macOS set)   138 / 2 / 5    3.5 s
+#     PP-OCR small alone (the old set off a Mac)        129 / 6 / 10   3.0 s
+#     small, close-ups also small read at 1.5x         135 / 1 / 9   10.4 s
+#     medium recogniser alone                          136 / 2 / 7    9.8 s
+#     medium; close-ups medium + small at 1.5x  (used) 139 / 1 / 5   16.3 s
+#     the same plus Apple Vision                       139 / 0 / 6   14.9 s
+# English-only recognisers (PP-OCRv4/v5 en), the medium detector, inverted,
+# CLAHE and grey reads were tried and lost to these. Vision adds nothing on top
+# of the set used, so Mac and production behave the same.
+ENGINES = {                     # name -> (detector, recogniser) files in MODELS
+    "small": ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx"),
+    "medium": ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_medium.onnx"),
+}
+# A reader is an engine, optionally on the image enlarged ("small@1.5"): the
+# 1.5x read is what tells a thin R8 from R6 close up.
+BOARD_READERS = ("medium",)                 # the whole-board read
+LOCAL_READERS = ("medium", "small@1.5")     # close-ups: unnamed boxes, duplicated names
+
+# file -> (sha256, bytes, path in RapidOCR 3.9.2's model hub, which
+# models/ocr/fetch.py downloads from; this module never touches the network).
+# Apache-2.0 (PaddleOCR models, RapidOCR ONNX conversions). RapidOCR loads its
+# classifier even with the angle classifier off, so it is here, never run.
+MODELS: dict[str, tuple[str, int, str]] = {
+    "PP-OCRv6_det_small.onnx": ("090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+                                9929594, "PP-OCRv6/det/PP-OCRv6_det_small.onnx"),
+    "PP-OCRv6_rec_small.onnx": ("6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+                                21234383, "PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"),
+    "PP-OCRv6_rec_medium.onnx": ("eef444829dbbe18d7fea59a3f6eb75647518d2b3a9568d27c92e42940204894b",
+                                 76629984, "PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx"),
+    "ch_ppocr_mobile_v2.0_cls_mobile.onnx": ("e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+                                             585532, "PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx"),
+}
+CLS_MODEL = "ch_ppocr_mobile_v2.0_cls_mobile.onnx"
+# Where the model files live on this machine. Not in git (~108 MB); filled once
+# by `python -m aoi.photo.names install-models --from DIR` (models/ocr/README.md).
+OCR_MODEL_DIR = Path(os.environ.get("AOI_OCR_MODELS") or config.REPO_ROOT / "models" / "ocr")
+
+_ENGINE: dict[str, object] = {}
 _LOCK = threading.Lock()
 _DIGITS = str.maketrans({"O": "0", "I": "1"})
 _NUMBERISH = re.compile(rf"({_ALT})([0-9OI]{{1,3}})")
+
+
+class OCRModelsMissing(RuntimeError):
+    """The pinned OCR model files are not on this machine. Never answered with a download."""
 
 
 def have_rapid() -> bool:
@@ -128,35 +178,91 @@ def have_rapid() -> bool:
     return importlib.util.find_spec("rapidocr") is not None
 
 
-def have_vision() -> bool:
-    import importlib.util
-    import sys
-    return sys.platform == "darwin" and importlib.util.find_spec("Vision") is not None
+def missing_models(folder: Path | None = None) -> list[str]:
+    """Model files the readers need that are absent or the wrong size (a cheap
+    check; verify_models hashes them)."""
+    folder = Path(folder or OCR_MODEL_DIR)
+    need = {CLS_MODEL} | {m for r in BOARD_READERS + LOCAL_READERS for m in ENGINES[r.split("@")[0]]}
+    return sorted(n for n in need
+                  if not (folder / n).is_file() or (folder / n).stat().st_size != MODELS[n][1])
 
 
 def available() -> bool:
-    return have_rapid() or have_vision()
+    return have_rapid() and not missing_models()
 
 
-def _rapid():
-    global _RAPID
+def unavailable_note() -> str:
+    if not have_rapid():
+        return "silkscreen names need rapidocr (see requirements.txt)"
+    return (f"silkscreen names need the OCR model files in {OCR_MODEL_DIR} "
+            f"(missing: {', '.join(missing_models())}); see models/ocr/README.md")
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def verify_models(folder: Path | None = None) -> list[str]:
+    """Pinned model files that are missing or do not hash to MODELS."""
+    folder = Path(folder or OCR_MODEL_DIR)
+    return [n for n, (sha, _, _) in MODELS.items()
+            if not (folder / n).is_file() or _sha256(folder / n) != sha]
+
+
+def install_models(source: Path, dest: Path | None = None) -> list[str]:
+    """Copy every pinned model file from `source` (a USB stick, the folder
+    models/ocr/fetch.py downloaded into, another install's rapidocr/models)
+    into `dest`, each checked against its SHA-256 before it is kept."""
+    import shutil
+    dest = Path(dest or OCR_MODEL_DIR)
+    dest.mkdir(parents=True, exist_ok=True)
+    done = []
+    for name, (sha, _, _) in MODELS.items():
+        out = dest / name
+        if out.is_file() and _sha256(out) == sha:
+            continue
+        if not (Path(source) / name).is_file():
+            raise OCRModelsMissing(f"{name}: not in {source}")
+        tmp = out.with_suffix(".part")
+        shutil.copyfile(Path(source) / name, tmp)
+        if _sha256(tmp) != sha:
+            tmp.unlink()
+            raise OCRModelsMissing(f"{name}: checksum does not match the pinned one; not kept")
+        tmp.replace(out)
+        done.append(name)
+    return done
+
+
+def _engine(name: str):
+    """One RapidOCR per engine, built from the pinned files only. With a file
+    missing it raises, where RapidOCR itself would try to download."""
     with _LOCK:
-        if _RAPID is None:
+        if name not in _ENGINE:
+            gone = missing_models()
+            if gone:
+                raise OCRModelsMissing(unavailable_note())
             from rapidocr import RapidOCR
+            det, rec = ENGINES[name]
             # use_cls off: every quarter turn is read anyway, so each line is
             # upright in one of them; the angle classifier flips a line's
             # crop but not its character boxes, which swaps "R6R3" to R3, R6.
             # Det limit "max": the default blows a small crop up until its
             # short side is 736 px, and text that large is not detected.
-            _RAPID = RapidOCR(params={"Global.log_level": "error", "Global.max_side_len": 8192,
-                                      "Global.min_side_len": 8, "Global.use_cls": False,
-                                      "Global.return_word_box": True,
-                                      "Global.return_single_char_box": True,
-                                      "Det.limit_type": "max", "Det.limit_side_len": 8192,
-                                      # the OCR pool runs several reads at once
-                                      "EngineConfig.onnxruntime.intra_op_num_threads": 2,
-                                      "EngineConfig.onnxruntime.inter_op_num_threads": 1})
-        return _RAPID
+            _ENGINE[name] = RapidOCR(params={
+                "Global.log_level": "error", "Global.max_side_len": 8192,
+                "Global.min_side_len": 8, "Global.use_cls": False,
+                "Global.return_word_box": True, "Global.return_single_char_box": True,
+                "Det.limit_type": "max", "Det.limit_side_len": 8192,
+                "Det.model_path": str(OCR_MODEL_DIR / det), "Rec.model_path": str(OCR_MODEL_DIR / rec),
+                "Cls.model_path": str(OCR_MODEL_DIR / CLS_MODEL),
+                # the OCR pool runs several reads at once
+                "EngineConfig.onnxruntime.intra_op_num_threads": 2,
+                "EngineConfig.onnxruntime.inter_op_num_threads": 1})
+        return _ENGINE[name]
 
 
 def _unrotate(u: np.ndarray, v: np.ndarray, k: int, H: int, W: int) -> tuple[np.ndarray, np.ndarray]:
@@ -172,7 +278,7 @@ def _unrotate(u: np.ndarray, v: np.ndarray, k: int, H: int, W: int) -> tuple[np.
 
 def normalise(text: str) -> str:
     """Upper case, and O/I read as 0/1 where they stand in a designator's
-    number (Vision reads R10 as "R1O" and D1 as "Di"). Length is kept."""
+    number (an OCR reads R10 as "R1O" and D1 as "Di"). Length is kept."""
     t = text.upper()
     return _NUMBERISH.sub(lambda m: m.group(1) + m.group(2).translate(_DIGITS), t)
 
@@ -189,58 +295,29 @@ def designators(text: str) -> list[tuple[str, int, int]]:
     return [(m.group(0), m.start(), m.end()) for m in ALONE.finditer(t)]
 
 
-def _read_rapid(img: np.ndarray) -> list[tuple[str, float, np.ndarray]]:
-    """(name, score, corner points) from PP-OCR, in `img` pixels."""
-    out = []
-    r = _rapid()(img)
-    for line, score in zip(r.word_results or (), r.scores or ()):
-        if score < MIN_SCORE:
-            continue
-        chars = [(c, np.asarray(b, np.float32)) for c, _, b in line if c.strip()]
-        text = "".join(c for c, _ in chars)
-        for name, a, b in designators(text):
-            out.append((name, float(score), np.concatenate([p for _, p in chars[a:b]])))
-    return out
+def _reader(spec: str):
+    """(name, score, corner points) reader for one spec ("medium", "small@1.5"),
+    points in the pixels of the image it is given."""
+    name, _, k = spec.partition("@")
+    k = float(k or 1.0)
 
-
-def _read_vision(img: np.ndarray) -> list[tuple[str, float, np.ndarray]]:
-    """(name, score, corner points) from Apple Vision (macOS), in `img` pixels."""
-    import Vision
-    from Foundation import NSData
-    ok, buf = cv2.imencode(".png", img)
-    handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(
-        NSData.dataWithBytes_length_(buf.tobytes(), len(buf)), None)
-    req = Vision.VNRecognizeTextRequest.alloc().init()
-    req.setRecognitionLevel_(0)                  # accurate
-    req.setUsesLanguageCorrection_(False)        # designators are not words
-    handler.performRequests_error_([req], None)
-    H, W = img.shape[:2]
-    out = []
-    for o in req.results() or []:
-        c = o.topCandidates_(1)[0]
-        score = float(c.confidence())
-        if score < MIN_SCORE:
-            continue
-        text = str(c.string())
-        found = designators(text)
-        line = o.boundingBox()
-        for name, a, b in found:
-            box, _ = c.boundingBoxForRange_error_((a, b - a), None)
-            if box is None:
+    def read(img: np.ndarray) -> list[tuple[str, float, np.ndarray]]:
+        if k != 1.0:
+            img = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC)
+        out = []
+        r = _engine(name)(img)
+        for line, score in zip(r.word_results or (), r.scores or ()):
+            if score < MIN_SCORE:
                 continue
-            bb = box.boundingBox()                  # normalised, origin bottom left
-            x0, x1 = bb.origin.x * W, (bb.origin.x + bb.size.width) * W
-            if len(found) > 1 and bb.size.width >= 0.9 * line.size.width:
-                # Vision often answers a range with the whole line's box ("R6 R3"
-                # as one 261 px box for each name): split it by character share
-                lx0, lw = line.origin.x * W, line.size.width * W
-                x0, x1 = lx0 + lw * a / len(text), lx0 + lw * b / len(text)
-            y0, y1 = (1 - bb.origin.y - bb.size.height) * H, (1 - bb.origin.y) * H
-            out.append((name, score, np.float32([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])))
-    return out
+            chars = [(c, np.asarray(b, np.float32)) for c, _, b in line if c.strip()]
+            text = "".join(c for c, _ in chars)
+            for nm, a, b in designators(text):
+                out.append((nm, float(score), np.concatenate([p for _, p in chars[a:b]]) / k))
+        return out
+    return read
 
 
-OCR_WORKERS = 6                 # both recognisers release the GIL; 6 threads ~ 4x on an M-series Mac
+OCR_WORKERS = max(1, min(6, os.cpu_count() or 1))   # onnxruntime releases the GIL
 _POOL = None
 
 
@@ -280,11 +357,10 @@ def _read_turn(read, img: np.ndarray, k: int, x0: int, y0: int, scale: float) ->
 
 def read_many(bgr: np.ndarray, regions: list, scale: float = 1.0, turns=(0, 1, 2, 3),
               readers=None) -> list[list[Label]]:
-    """read_labels for several regions at once, every (region, turn,
-    recogniser) on the OCR pool; one merged label list per region."""
-    want = set(readers or ("rapid", "vision"))
-    readers = (([_read_rapid] if have_rapid() and "rapid" in want else [])
-               + ([_read_vision] if have_vision() and "vision" in want else []))
+    """read_labels for several regions at once, every (region, turn, reader)
+    on the OCR pool; one merged label list per region. `readers`: reader specs,
+    BOARD_READERS when None."""
+    readers = [_reader(r) for r in (readers or BOARD_READERS)]
     jobs = []
     for ri, region in enumerate(regions):
         img, x0, y0 = _crop(bgr, region, scale)
@@ -302,7 +378,7 @@ def read_many(bgr: np.ndarray, regions: list, scale: float = 1.0, turns=(0, 1, 2
 def read_labels(bgr: np.ndarray, region: tuple[int, int, int, int] | None = None,
                 scale: float = 1.0) -> list[Label]:
     """Every designator in `bgr` (or its region x, y, w, h), read at all four
-    quarter turns by every recogniser available, in full-image pixels, the
+    quarter turns by every board reader, in full-image pixels, the
     readings of one place pooled into one name (see merge)."""
     return read_many(bgr, [region], scale)[0]
 
@@ -323,7 +399,7 @@ SAME_TEXT = 0.3                 # box overlap above which two different readings
 def merge(labels: list[Label]) -> list[Label]:
     """One name per place. Readings within 0.8 character heights of each other
     are one place; its name is the one with the most summed confidence over
-    every recogniser and turn (R8 read by Vision twice beats PP-OCR's one "R6"),
+    every reader and turn (R8 read twice beats one "R6"),
     its score that sum. The same name at two places close together is one.
     Two different names are one place only when their text boxes overlap:
     a list printed sideways (Test 2's C7 R12 C8 R13) puts neighbouring names
@@ -683,7 +759,7 @@ def name_boxes(golden_bgr: np.ndarray, rects: list[tuple[int, int, int, int]]) -
     """Names for part boxes on golden 1: board-wide read, assignment, a closer
     read round every box still unnamed, and the assignment again."""
     if not available():
-        return Naming([None] * len(rects), note="silkscreen names need rapidocr (see requirements.txt)")
+        return Naming([None] * len(rects), note=unavailable_note())
     labels = rescore_duplicates(golden_bgr, read_labels(golden_bgr, _board_region(golden_bgr)))
     detail: dict = {}
     names = assign(rects, labels, golden_bgr, detail)
@@ -765,3 +841,34 @@ def named_parts(parts: list[Part], names: list[str | None]) -> list[Part]:
         else:
             out.append(p)
     return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    """python -m aoi.photo.names install-models --from DIR [--to DIR] | verify-models [--to DIR]"""
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m aoi.photo.names",
+                                 description="OCR model files for silkscreen names (offline install)")
+    ap.add_argument("command", choices=("install-models", "verify-models"))
+    ap.add_argument("--from", dest="source", type=Path, default=None, help="folder holding the model files")
+    ap.add_argument("--to", dest="dest", type=Path, default=None, help=f"model folder (default {OCR_MODEL_DIR})")
+    a = ap.parse_args(argv)
+    dest = a.dest or OCR_MODEL_DIR
+    try:
+        if a.command == "install-models":
+            if a.source is None:
+                ap.error("install-models needs --from DIR (models/ocr/fetch.py downloads one)")
+            got = install_models(a.source, dest)
+            print(f"{dest}: {len(got)} file(s) added, {len(MODELS) - len(got)} already there")
+        bad = verify_models(dest)
+    except (OSError, OCRModelsMissing) as e:
+        print(f"failed: {e}", file=sys.stderr)
+        return 1
+    if bad:
+        print(f"{dest}: missing or wrong checksum: {', '.join(bad)}", file=sys.stderr)
+        return 1
+    print(f"{dest}: all {len(MODELS)} model files present and verified")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

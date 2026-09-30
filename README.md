@@ -165,6 +165,13 @@ diffuse light, and the same camera and distance for golden and test photos
 HEIC opens directly on macOS (through the built-in `sips`); elsewhere it needs
 `pip install pillow-heif`. JPEG needs nothing.
 
+Part names come off the board's silkscreen at teach (PP-OCR via RapidOCR, the
+same on macOS, Linux x86 and ARM64, fully offline). The OCR model files (~108
+MB) are not in git. Download them once with `python models/ocr/fetch.py` on a
+machine with network. On the offline machine, copy the folder over and run
+`python -m aoi.photo.names install-models --from DIR`. See `models/ocr/README.md`.
+Without them, teach still works and parts keep P-numbers.
+
 Headless, for scripts:
 
 ```bash

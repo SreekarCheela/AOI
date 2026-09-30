@@ -139,7 +139,51 @@ def test_named_parts_take_type_and_polarity_and_keep_a_name_once():
 
 # ------------------------------------------------------------------ the real board
 needs_ocr = pytest.mark.skipif(not ((FIXTURE / "Golden.jpg").exists() and N.available()),
-                               reason="needs photos/fixtures/2026-09-25 and rapidocr or Apple Vision")
+                               reason="needs photos/fixtures/2026-09-25, rapidocr and models/ocr")
+
+
+# ------------------------------------------------------------------ offline models
+def test_missing_models_leave_parts_unnamed_with_a_reason_and_never_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(N, "OCR_MODEL_DIR", tmp_path)
+    monkeypatch.setattr(N, "_ENGINE", {})
+    assert set(N.missing_models()) >= {"PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_medium.onnx"}
+    assert not N.available()
+    res = N.name_boxes(np.zeros((40, 40, 3), np.uint8), [(1, 1, 8, 8)])
+    assert res.names == [None] and "fetch" not in res.note and "models/ocr/README.md" in res.note
+    with pytest.raises(N.OCRModelsMissing):
+        N._engine("medium")
+
+
+def test_install_models_refuses_a_file_that_does_not_match_its_pinned_hash(tmp_path, monkeypatch):
+    src = tmp_path / "usb"; src.mkdir()
+    name = N.CLS_MODEL
+    (src / name).write_bytes(b"not the model")
+    monkeypatch.setattr(N, "MODELS", {name: N.MODELS[name]})
+    with pytest.raises(N.OCRModelsMissing, match="checksum"):
+        N.install_models(src, tmp_path / "ocr")
+    assert not (tmp_path / "ocr" / name).exists()
+
+
+def test_readers_are_the_same_on_every_platform():
+    # no platform-specific recogniser: a Mac names parts exactly as the production machine
+    assert all(r.split("@")[0] in N.ENGINES for r in N.BOARD_READERS + N.LOCAL_READERS)
+    assert not hasattr(N, "have_vision")
+
+
+def test_an_enlarged_read_reports_points_in_the_image_it_was_given(monkeypatch):
+    class Out:
+        word_results = [[("R", 0.9, [[20, 10], [30, 10], [30, 30], [20, 30]]),
+                         ("8", 0.9, [[30, 10], [40, 10], [40, 30], [30, 30]])]]
+        scores = [0.9]
+    seen = {}
+
+    def fake(img):
+        seen["shape"] = img.shape
+        return Out()
+    monkeypatch.setattr(N, "_engine", lambda name: fake)
+    got = N._reader("small@2")(np.zeros((50, 60, 3), np.uint8))
+    assert seen["shape"][:2] == (100, 120)
+    assert got[0][0] == "R8" and got[0][2][:, 0].max() == 20.0     # 40 px at 2x -> 20 px
 
 
 @needs_ocr
@@ -151,7 +195,8 @@ def test_fixture_golden_names_nearly_every_part_and_never_with_the_wrong_type():
     res = N.name_boxes(g, rects)
     right = sum(n == q.refdes for n, q in zip(res.names, truth))
     wrong = [(q.refdes, n) for n, q in zip(res.names, truth) if n and n != q.refdes]
-    # measured 2026-09-27: 33-36 right, 0-1 wrong (in-sample: this board shaped the rules)
+    # measured 2026-09-27: 33-36 right, 0-1 wrong; 2026-09-30 (medium PP-OCR, no Apple
+    # Vision): 33 right, 1 wrong (R11 as R1), 3 unnamed (in-sample: this board shaped the rules)
     assert right >= 32, (right, wrong)
     assert len(wrong) <= 2, wrong
     assert all(N.type_of(n)[0] == N.type_of(t)[0] for t, n in wrong), wrong

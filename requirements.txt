@@ -12,8 +12,10 @@ pillow==12.3.0
 
 scipy==1.18.1
 
-# Silkscreen names at teach (aoi/photo/names.py). Both recognisers run offline
-# and each reads labels the other misses; with neither, parts keep P-numbers.
+# Silkscreen names at teach (aoi/photo/names.py): PP-OCR through rapidocr on
+# onnxruntime, offline, the same on every platform. The model files are not a
+# pip dependency: `python models/ocr/fetch.py` (models/ocr/README.md).
+# Without rapidocr or the models, parts keep P-numbers.
 # rapidocr's metadata asks for the GUI opencv-python, which would overwrite
 # the headless build above, so install it without dependencies:
 #   pip install --no-deps rapidocr==3.9.2
@@ -27,9 +29,6 @@ colorlog==6.12.0
 tqdm==4.70.1
 requests==2.34.2
 six==1.17.0
-# Apple Vision text recognition, macOS only
-pyobjc-framework-Vision==12.2.2 ; sys_platform == "darwin"
-pyobjc-framework-Quartz==12.2.2 ; sys_platform == "darwin"
 
 # test-only
 pytest==8.4.2
