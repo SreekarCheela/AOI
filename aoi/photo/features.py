@@ -489,8 +489,14 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0,
     fine: dict[float, tuple] = {}
     jobs = [(float(a), c_loc) for _, c_best, c_loc in sorted(coarse)[:PLACE_KEEP]
             for a in np.arange(c_best - 2.0, c_best + 2.0 + 1e-6, 0.5)]
-    for (a, _), r in zip(jobs, run(lambda j: near(*j), jobs)):     # merged in search order
+    # Neighbouring coarse candidates at the same location ask for the same
+    # (angle, location) search again; each is run once. The merge still walks
+    # every job in search order, so the result is the same as searching them all.
+    unique = list(dict.fromkeys((round(a, 6), c_loc) for a, c_loc in jobs))
+    done = dict(zip(unique, run(lambda j: near(*j), unique)))
+    for a, c_loc in jobs:
         k = round(a, 6)
+        r = done[(k, c_loc)]
         if k not in fine or r[0] < fine[k][0]:
             fine[k] = r
     best = min(fine, key=lambda a: fine[a][0])
