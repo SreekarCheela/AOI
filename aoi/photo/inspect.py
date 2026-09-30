@@ -17,6 +17,9 @@ measured on the wrong pixels.
 from __future__ import annotations
 
 import math
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -51,6 +54,47 @@ class Golden:
         if self._board_mask is None:
             self._board_mask = gate.board_mask(self.bgr)
         return self._board_mask
+
+    def warm(self) -> None:
+        """Do every part's golden-side work now (features.GoldenSide), so the
+        first board is as fast as the rest. The same objects the first board
+        would have built, so no number changes."""
+        def one(p: Part) -> None:
+            try:
+                F._golden_side(self.frame, p, self.frame)
+            except Exception:                      # noqa: BLE001 - the board run reports it
+                pass
+        list(F.pool().map(one, self.program.parts))
+        _ = self.board_mask
+
+
+# Goldens kept between runs. Building one decodes every golden photo, finds its
+# SIFT features and measures sharpness (~0.7 s on an M5, several times that on
+# a Raspberry Pi), and its first board then does each part's golden-side work
+# (~0.2 s more). A line inspects one board per run, so without this every board
+# paid both: 1.46 s a board against 0.55 s warm (2026-09-30, Test 2).
+GOLDENS_KEPT = 2
+_GOLDENS: OrderedDict[tuple, "Golden"] = OrderedDict()
+_GOLDENS_LOCK = threading.Lock()
+
+
+def golden_for(program: Program) -> Golden:
+    """Golden 1 of this program version, built and warmed once, then reused by
+    every run. A saved program version never changes (a re-teach is a new
+    version), so the version pins it."""
+    key = (str(Path(program.path).resolve()), program.version)
+    with _GOLDENS_LOCK:                           # held while building: a second caller waits, not rebuilds
+        g = _GOLDENS.get(key)
+        if g is None:
+            g = Golden(program)
+            warm = getattr(g, "warm", None)
+            if warm is not None:
+                warm()
+            _GOLDENS[key] = g
+            while len(_GOLDENS) > GOLDENS_KEPT:
+                _GOLDENS.popitem(last=False)
+        _GOLDENS.move_to_end(key)
+        return g
 
 
 def _grown(p: Part, pad: float) -> tuple[int, int, int, int]:
@@ -122,31 +166,58 @@ def prefetch(photos: list[Path]) -> Iterator[tuple[Path, Callable[[], np.ndarray
             yield f, cur.result
 
 
+def _timed(fn, t: dict, key: str):
+    """fn, recording its own run time in t[key] (for work on another thread)."""
+    def run(*a):
+        t0 = time.perf_counter()
+        try:
+            return fn(*a)
+        finally:
+            t[key] = time.perf_counter() - t0
+    return run
+
+
 def inspect(program: Program, image: str | Path, golden: Golden | None = None,
-            calibrators: dict | None = None, bgr: np.ndarray | None = None
-            ) -> tuple[BoardResult, np.ndarray | None]:
+            calibrators: dict | None = None, bgr: np.ndarray | None = None,
+            timings: dict | None = None) -> tuple[BoardResult, np.ndarray | None]:
     """BoardResult and the test photo aligned into golden-1 pixels (None if it
-    could not be aligned). `bgr` is the photo already loaded (prefetch)."""
+    could not be aligned). `bgr` is the photo already loaded (prefetch).
+    `timings`, when given, receives each stage's seconds (the bench command)."""
+    t = {} if timings is None else timings
+    clock = [time.perf_counter()]
+
+    def lap(key: str) -> None:
+        now = time.perf_counter()
+        t[key] = t.get(key, 0.0) + now - clock[0]
+        clock[0] = now
+
     golden = golden or Golden(program)
     res = BoardResult(image=str(image), program=program.name, program_version=program.version,
                       verdict="REVIEW", px_per_mm=program.px_per_mm,
                       single_golden=program.single_golden, stamp=program.stamp)
     bgr = load_bgr(image) if bgr is None else bgr
+    lap("load")
     reg = register.register(golden.keypoints, grey(bgr))
+    lap("register")
     res.registration = dict(ok=reg.ok, inliers=reg.inliers, matches=reg.matches, fit=reg.fit, note=reg.note)
     if not reg.ok:
         return _board_review(res, f"could not align: {reg.note}; does not match program "
                                   f"{program.name} v{program.version}, or the photo is unusable"), None
     problems = gate.test_problems(bgr, golden.sharpness, register.area_scale(reg))
+    lap("gate")
     if problems:
         warped, _ = register.warp_to_ref(bgr, reg.H, golden.bgr.shape)
         return _board_review(res, "; ".join(problems)), warped
 
     warped, cover = register.warp_to_ref(bgr, reg.H, golden.bgr.shape)
+    lap("warp")
     img = F.Frame.of(warped, cover)
     _ = golden.board_mask                          # built once, before the pool shares it
-    blobs = F.pool().submit(_diff_blobs, program, golden, warped, cover) if config.PHOTO_DIFF else None
+    lap("frame")
+    blobs = (F.pool().submit(_timed(_diff_blobs, t, "diff (own thread)"), program, golden, warped, cover)
+             if config.PHOTO_DIFF else None)
     measures = F.measure_all(golden.frame, img, program.parts)
+    lap("measure parts")
     noise = judge.board_noise(measures)
     res.common_shift_px = (noise["dx"], noise["dy"])
     res.noise_px = noise["sigma"]
@@ -155,8 +226,11 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
         res.parts.append(judge.judge_part(p, measures[p.refdes], noise=noise, px_per_mm=program.px_per_mm,
                                           stats=program.golden_stats.get(p.refdes),
                                           single_golden=program.single_golden))
+    lap("judge")
     if blobs is not None:
-        differences(res, program, golden, warped, cover, blobs.result())
+        got = blobs.result()
+        lap("wait for diff")
+        differences(res, program, golden, warped, cover, got)
     shift = math.hypot(noise["dx"], noise["dy"])
     if res.offset_limit_px > 0 and shift > res.offset_limit_px:
         res.board_calls.append(Call("board", "NOT CHECKED",
@@ -172,4 +246,5 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
     notes = list(res.reasons)
     judge.board_verdict(res)
     res.reasons += [n for n in notes if n not in res.reasons]
+    lap("finish")
     return res, warped

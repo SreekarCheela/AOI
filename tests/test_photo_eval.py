@@ -77,3 +77,24 @@ def test_report_names_escapes_and_false_calls():
     text = evaluate.report(s)
     assert "b R1 missing: missed" in text and "b R2: OFFSET (FAIL)" in text
     assert json.dumps(evaluate.to_json(s))            # serialisable
+
+
+def test_golden_is_kept_between_runs_per_program_version(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from aoi.photo import inspect as I
+    built = []
+
+    class FakeGolden:
+        def __init__(self, prog):
+            built.append(prog.version)
+            self.warmed = False
+
+        def warm(self):
+            self.warmed = True
+    monkeypatch.setattr(I, "Golden", FakeGolden)
+    monkeypatch.setattr(I, "_GOLDENS", type(I._GOLDENS)())
+    v1, v2 = (SimpleNamespace(path=tmp_path / "p" / f"v{v}", version=v) for v in (1, 2))
+    a = I.golden_for(v1)
+    assert I.golden_for(v1) is a and a.warmed
+    assert I.golden_for(v2) is not a              # a re-teach is a new version: a new golden
+    assert built == [1, 2]

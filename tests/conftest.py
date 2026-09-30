@@ -11,11 +11,16 @@ session-scoped and shared across the whole suite.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
 from aoi import board as B
 from aoi import roi, rules, synth
+
+# the photo app must not build goldens on background threads while tests run
+os.environ.setdefault("AOI_WARM_GOLDENS", "0")
 
 N_GOLDEN = 5
 

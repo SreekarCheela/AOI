@@ -5,6 +5,7 @@
     python -m aoi_photo inspect --program NAME DIR_OR_PHOTO
     python -m aoi_photo stats
     python -m aoi_photo eval    --program NAME DIR [--truth truth.json] [--boxes parts.csv]
+    python -m aoi_photo bench   --program NAME PHOTOS [--repeat 3]   time every stage on this machine
     python -m aoi_photo train-detector          retrain the part-box detector from taught boards
 
 Everything runs on this machine. Nothing is sent anywhere.
@@ -128,6 +129,29 @@ def cmd_eval(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench(a: argparse.Namespace) -> int:
+    """Time every inspection stage on this machine (the production box's numbers)."""
+    import json
+    from aoi.photo import bench, io, program
+    try:
+        prog = program.resolve(a.program, a.programs)
+        photos = io.photo_files(a.photos)
+    except (io.PhotoError, ValueError) as e:
+        print(f"cannot bench: {e}", file=sys.stderr)
+        return 2
+    photos = [f for f in photos if not f.stem.lower().startswith("golden")]
+    if not photos:
+        print(f"no board photos in {a.photos}", file=sys.stderr)
+        return 2
+    b = bench.run(prog, photos, a.repeat,
+                  progress=lambda r, f, res, t: print(f"  pass {r + 1}: {f.name} {t:.2f} s", file=sys.stderr))
+    print(bench.text(b))
+    if a.json:
+        Path(a.json).write_text(json.dumps(b, indent=1))
+        print(f"-> {a.json}")
+    return 0
+
+
 def cmd_stats(a: argparse.Namespace) -> int:
     from aoi.photo import record
     with record.Record(a.db) as rec:
@@ -190,6 +214,12 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--boxes", help="parts.csv in the program's golden-1 pixels: locates parts the program never taught")
     ev.add_argument("--json", help="also write the full score here")
     ev.set_defaults(fn=cmd_eval)
+    bn = sub.add_parser("bench", help="time every inspection stage on this machine")
+    bn.add_argument("--program", required=True, help="program name or folder")
+    bn.add_argument("photos", help="a board photo or a folder of them (golden* files are skipped)")
+    bn.add_argument("--repeat", type=int, default=3, help="passes over the photos after one warm-up")
+    bn.add_argument("--json", help="also write the numbers here")
+    bn.set_defaults(fn=cmd_bench)
     st = sub.add_parser("stats", help="false calls per package from operator labels")
     st.set_defaults(fn=cmd_stats)
     td = sub.add_parser("train-detector", help="retrain the part-box detector from taught boards (offline)")

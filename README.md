@@ -179,7 +179,15 @@ python -m aoi_photo teach --golden photos/golden/ --parts parts.csv --name board
 python -m aoi_photo inspect --program board photos/test/        # exit 0 pass, 1 review, 2 fail
 python -m aoi_photo stats
 python -m aoi_photo eval --program board photos/planted/ --json score.json   # needs photos/planted/truth.json
+python -m aoi_photo bench --program board photos/test/ --repeat 3            # time every stage on this machine
 ```
+
+`bench` runs the real inspection on each photo and prints the median time of
+every stage (registration, part measurement, whole-board diff and so on), then
+photo loading and report writing, and the resulting per-board time in a batch.
+It also prints the machine it ran on, and on a Raspberry Pi it warns if the Pi
+throttled during the run. Run it on the production machine: numbers from a
+laptop do not carry over.
 
 `eval` scores a program on boards whose defects are known. The folder holds one
 photo per board and a `truth.json` listing each planted defect

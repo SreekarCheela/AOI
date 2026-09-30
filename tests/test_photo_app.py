@@ -526,7 +526,7 @@ def test_inspect_worker_reports_a_golden_that_will_not_load(monkeypatch, tmp_pat
         raise MemoryError("golden too big")
     monkeypatch.setattr(app.photo_inspect, "Golden", bad)
     q = queue.Queue()
-    prog = SimpleNamespace(name="demo", version=1)
+    prog = SimpleNamespace(name="demo", version=1, path=tmp_path)
     app.inspect_worker(q, prog, [tmp_path / "a.jpg"], tmp_path / "photo.db", tmp_path)
     kind, msg = q.get_nowait()
     assert kind == "inspect_fatal" and "MemoryError: golden too big" in msg

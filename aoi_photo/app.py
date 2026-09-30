@@ -941,6 +941,19 @@ def _photo_or_blank(path: Path, like: np.ndarray) -> np.ndarray:
         return np.zeros_like(like)
 
 
+# build the picked program's golden in the background (off in the test suite)
+WARM_GOLDENS = os.environ.get("AOI_WARM_GOLDENS", "1") != "0"
+
+
+def warm_golden(prog: program.Program) -> None:
+    """Build and warm the program's golden before Run is clicked, so the first
+    board does not pay for it. A failure here is left for the run to report."""
+    try:
+        photo_inspect.golden_for(prog)
+    except Exception:                             # noqa: BLE001
+        pass
+
+
 def inspect_worker(q: queue.Queue, prog: program.Program, photos: list[Path], db: Path,
                    out_dir: Path) -> None:
     """`python -m aoi_photo inspect`'s loop, one queue message per board.
@@ -953,7 +966,7 @@ def inspect_worker(q: queue.Queue, prog: program.Program, photos: list[Path], db
     One bad photo never stops the batch: whatever it raises goes into its own
     row and the loop moves on."""
     try:
-        golden = photo_inspect.Golden(prog)
+        golden = photo_inspect.golden_for(prog)   # kept between runs (and warmed when the program was picked)
     except Exception as e:                        # noqa: BLE001
         q.put(("inspect_fatal", f"golden 1 of {prog.name} v{prog.version}: {error_text(e)}"))
         return
@@ -2443,6 +2456,8 @@ class App:
         self.l_istamp.configure(text=(f"every result from this program is stamped: {prog.stamp}"
                                       if prog is not None and prog.stamp else ""))
         self._sync_inspect()
+        if prog is not None and WARM_GOLDENS:
+            threading.Thread(target=warm_golden, args=(prog,), name="aoi-warm", daemon=True).start()
 
     def _sync_inspect(self) -> None:
         running = "inspect" in self.busy
