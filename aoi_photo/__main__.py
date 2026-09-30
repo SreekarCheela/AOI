@@ -4,6 +4,7 @@
     python -m aoi_photo teach   --golden DIR --parts parts.csv --name NAME [--px-per-mm X | --board-width-mm W]
     python -m aoi_photo inspect --program NAME DIR_OR_PHOTO
     python -m aoi_photo stats
+    python -m aoi_photo eval    --program NAME DIR [--truth truth.json] [--boxes parts.csv]
     python -m aoi_photo train-detector          retrain the part-box detector from taught boards
 
 Everything runs on this machine. Nothing is sent anywhere.
@@ -107,6 +108,26 @@ def cmd_inspect(a: argparse.Namespace) -> int:
     return worst
 
 
+def cmd_eval(a: argparse.Namespace) -> int:
+    """Score a program on photos with planted defects (truth.json). Writes a JSON
+    beside nothing else; the operator record is not touched."""
+    import json
+    from aoi.photo import evaluate, io, program
+    try:
+        prog = program.resolve(a.program, a.programs)
+        s = evaluate.run(prog, a.photos, a.truth, a.boxes,
+                         progress=lambda f, r, t: print(f"  {f.name}: {r.verdict} ({t:.2f} s)", file=sys.stderr))
+    except (io.PhotoError, ValueError, OSError) as e:
+        print(f"cannot evaluate: {e}", file=sys.stderr)
+        return 2
+    print(f"program {prog.name} v{prog.version} on {a.photos}")
+    print(evaluate.report(s))
+    if a.json:
+        Path(a.json).write_text(json.dumps(evaluate.to_json(s), indent=1))
+        print(f"-> {a.json}")
+    return 0
+
+
 def cmd_stats(a: argparse.Namespace) -> int:
     from aoi.photo import record
     with record.Record(a.db) as rec:
@@ -162,6 +183,13 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--program", required=True, help="program name or folder")
     i.add_argument("photos", help="a photo or a folder of them")
     i.set_defaults(fn=cmd_inspect)
+    ev = sub.add_parser("eval", help="score a program on photos with known defects (truth.json)")
+    ev.add_argument("--program", required=True, help="program name or folder")
+    ev.add_argument("photos", help="folder of board photos with a truth.json")
+    ev.add_argument("--truth", help="truth file (default: FOLDER/truth.json)")
+    ev.add_argument("--boxes", help="parts.csv in the program's golden-1 pixels: locates parts the program never taught")
+    ev.add_argument("--json", help="also write the full score here")
+    ev.set_defaults(fn=cmd_eval)
     st = sub.add_parser("stats", help="false calls per package from operator labels")
     st.set_defaults(fn=cmd_stats)
     td = sub.add_parser("train-detector", help="retrain the part-box detector from taught boards (offline)")

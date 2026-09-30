@@ -171,7 +171,18 @@ Headless, for scripts:
 python -m aoi_photo teach --golden photos/golden/ --parts parts.csv --name board   # --board-width-mm W optional
 python -m aoi_photo inspect --program board photos/test/        # exit 0 pass, 1 review, 2 fail
 python -m aoi_photo stats
+python -m aoi_photo eval --program board photos/planted/ --json score.json   # needs photos/planted/truth.json
 ```
+
+`eval` scores a program on boards whose defects are known. The folder holds one
+photo per board and a `truth.json` listing each planted defect
+(`{"image": "board3", "refdes": "R7", "defect": "skew"}`; defects are `missing`,
+`offset`, `skew`, `wrong_part`, `tombstone`, `reversed`, `marking_differs`).
+A photo with no entry is a good board, so anything flagged on it is a false call.
+It prints, for each defect type, how many were caught, caught under another
+label, missed, or on a part the program never taught. It then lists every false
+call and the board escapes. It writes nothing to the operator record. Its rates
+mean something only on boards that were not used to set a threshold.
 
 `parts.csv` has these columns: `refdes,x,y,w,h,type,package,polarized,marked_end`,
 in golden-1 pixels. Reports go to `out/photo_runs/<program>/<time>/`: an
