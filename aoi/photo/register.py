@@ -177,3 +177,215 @@ def warp_to_ref(img: np.ndarray, H: np.ndarray, shape: tuple[int, ...]
 def area_scale(reg: Registration) -> float:
     """Test-to-golden area scale of the alignment (1.0 = same distance)."""
     return float(abs(np.linalg.det(reg.H[:2, :2]))) if reg.ok else 0.0
+
+
+# ------------------------------------------------------ landmark registration
+# The fast path (config.PHOTO_REGISTRATION = "landmarks"). SIFT over the whole
+# 1600 px copy is ~150 ms of a board on an M5 and would be most of a second on a
+# Raspberry Pi 5. Commercial AOI aligns on fiducials instead: find a few known
+# marks in small windows at full resolution and fit the transform to them.
+#
+# Landmarks here are chosen from golden 1 with nobody marking anything: corner-
+# like patches (pads, silkscreen text, drill holes) away from every taught part,
+# since parts are what go missing or move, spread over the board, and each
+# unique within its own search window. With more than one golden, only the ones
+# every other golden shot finds again (NCC >= LM_STABLE) are kept, which drops
+# anything glare or shading changes.
+#
+# Per test photo: a rough alignment first (the last board's own alignment on a
+# fixed rig, else SIFT on an 800 px copy, ~35 ms), then each landmark found to a
+# sub-pixel in a +-LM_SEARCH px window of the test photo warped by that rough
+# alignment, then a RANSAC homography through the landmark pairs. Anything that
+# looks wrong falls back to register() above: too few landmarks found, a poor
+# fit, or an aligned photo that does not lie on the reference.
+#
+# 2026-09-30, the two fixtures (handheld phone photos): ~40 ms against ~150 ms,
+# fit RMS 2-2.5 px on test boards (a handheld shot is not one plane to a
+# homography; per-part re-alignment takes the rest), same catches as SIFT,
+# false calls 12 -> 13 on Test 2 and 14 -> 12 on Test 1. In-sample, so SIFT stays
+# the default until held-out boards say otherwise.
+LM_PATCH = 81                   # landmark patch side, px (odd)
+LM_SEARCH = 24                  # +-px searched round the rough alignment's prediction
+LM_GRID = 4                     # board split LM_GRID x LM_GRID for spread
+LM_PER_CELL = 3
+LM_MAX = 40                     # candidates tried per program
+LM_UNIQUE = 0.7                 # a second match in the window at or above this: ambiguous
+LM_SHARP = 0.9                  # 3 px off its own peak the match must fall below this
+LM_STABLE = 0.85                # NCC every other golden shot must reach
+LM_MATCH = 0.7                  # NCC a test photo's landmark must reach to be used
+LM_MIN = 6                      # landmarks needed for a fit
+LM_MAX_RMS = 3.0                # px; a worse fit falls back to SIFT
+LM_PRIOR_RMS = 1.5              # px; a fit from the last board's alignment must beat this
+LM_COARSE_SIDE = 800            # rough SIFT copy, long side px
+LM_COARSE_MIN = 20              # rough SIFT inliers needed
+
+
+@dataclass
+class Landmarks:
+    points: np.ndarray            # (N, 2) int, golden-1 full-resolution pixels
+    grey: np.ndarray              # golden 1, float32
+    coarse: Keypoints             # golden 1's SIFT on the LM_COARSE_SIDE copy
+    last_H: np.ndarray | None = None      # the last board's alignment (a fixed rig's prior)
+
+
+def _keypoints_at(grey_img: np.ndarray, side: int, nfeatures: int = 4000) -> Keypoints:
+    k = min(1.0, side / max(grey_img.shape[:2]))
+    s = cv2.resize(grey_img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA) if k < 1 else grey_img
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    kp, desc = cv2.SIFT_create(nfeatures=nfeatures).detectAndCompute(clahe.apply(s), None)
+    return Keypoints(s, k, kp, desc)
+
+
+def landmark_candidates(golden_bgr: np.ndarray, parts, board_mask: np.ndarray | None = None) -> np.ndarray:
+    """Distinct, corner-like patch centres away from every part, spread over the board."""
+    g = cv2.cvtColor(golden_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    H, W = g.shape
+    h = LM_PATCH // 2
+    ok = np.ones((H, W), np.uint8)
+    if board_mask is not None:
+        ok &= cv2.resize(board_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+    for p in parts:
+        m = int(0.5 * max(p.w, p.h)) + h
+        ok[max(0, p.y - m):p.y + p.h + m, max(0, p.x - m):p.x + p.w + m] = 0
+    e = h + LM_SEARCH + 4
+    ok[:e] = 0; ok[-e:] = 0; ok[:, :e] = 0; ok[:, -e:] = 0
+    ok = cv2.erode(ok, np.ones((LM_PATCH, LM_PATCH), np.uint8))
+    gx, gy = cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1)
+    k = (LM_PATCH, LM_PATCH)
+    sxx, syy, sxy = (cv2.boxFilter(a, -1, k) for a in (gx * gx, gy * gy, gx * gy))
+    tr = sxx + syy
+    lmin = tr / 2 - np.sqrt(np.maximum(tr * tr / 4 - (sxx * syy - sxy * sxy), 0))   # Shi-Tomasi strength
+    lmin[ok == 0] = 0
+    small = lmin[::4, ::4]
+    peaks = (small == cv2.dilate(small, np.ones((11, 11), np.uint8))) & (small > 0)
+    ys, xs = np.nonzero(peaks)
+    out: list[tuple[int, int, tuple[int, int]]] = []
+    tried = 0
+    for i in np.argsort(-small[ys, xs]):
+        y, x = int(ys[i]) * 4, int(xs[i]) * 4
+        cell = (min(LM_GRID - 1, y * LM_GRID // H), min(LM_GRID - 1, x * LM_GRID // W))
+        if sum(1 for o in out if o[2] == cell) >= LM_PER_CELL:
+            continue
+        if any(abs(x - o[0]) < LM_PATCH and abs(y - o[1]) < LM_PATCH for o in out):
+            continue
+        tried += 1
+        tpl = g[y - h:y + h + 1, x - h:x + h + 1]
+        win = g[y - h - LM_SEARCH:y + h + LM_SEARCH + 1, x - h - LM_SEARCH:x + h + LM_SEARCH + 1]
+        r = cv2.matchTemplate(win, tpl, cv2.TM_CCOEFF_NORMED)
+        c = LM_SEARCH
+        peak = r == cv2.dilate(r, np.ones((5, 5), np.uint8))
+        peak[c - 3:c + 4, c - 3:c + 4] = False
+        second = float(r[peak].max()) if peak.any() else -1.0
+        sharp = float(max(r[c, c - 3], r[c, c + 3], r[c - 3, c], r[c + 3, c]))
+        if second < LM_UNIQUE and sharp < LM_SHARP:
+            out.append((x, y, cell))
+        if len(out) >= LM_MAX or tried > 400:
+            break
+    return np.array([(x, y) for x, y, _ in out], np.int32).reshape(-1, 2)
+
+
+def _find(lm: Landmarks, img: np.ndarray, H0: np.ndarray, points: np.ndarray
+          ) -> tuple[np.ndarray, np.ndarray]:
+    """For each landmark: the test point it was found at (via H0) and the match NCC."""
+    from .features import subpixel
+    h, n = LM_PATCH // 2, LM_PATCH // 2 + LM_SEARCH
+    Hinv = np.linalg.inv(H0)
+    src, q = [], []
+    for x, y in points:
+        T = np.array([[1, 0, -(x - n)], [0, 1, -(y - n)], [0, 0, 1]], np.float64) @ H0
+        win = cv2.warpPerspective(img, T, (2 * n + 1, 2 * n + 1), flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        r = cv2.matchTemplate(win, lm.grey[y - h:y + h + 1, x - h:x + h + 1], cv2.TM_CCOEFF_NORMED)
+        _, v, _, loc = cv2.minMaxLoc(r)
+        px, py = subpixel(r, loc)
+        pt = Hinv @ np.array([x + px - LM_SEARCH, y + py - LM_SEARCH, 1.0])
+        src.append(pt[:2] / pt[2])
+        q.append(v)
+    return np.float32(src).reshape(-1, 2), np.array(q, np.float32)
+
+
+def make_landmarks(golden_bgr: np.ndarray, parts, other_goldens: list[np.ndarray] = (),
+                   board_mask: np.ndarray | None = None) -> Landmarks:
+    """Golden 1's landmarks, kept only where every other golden shot finds them again."""
+    g = cv2.cvtColor(golden_bgr, cv2.COLOR_BGR2GRAY)
+    lm = Landmarks(landmark_candidates(golden_bgr, parts, board_mask), g.astype(np.float32),
+                   _keypoints_at(g, LM_COARSE_SIDE))
+    worst = np.ones(len(lm.points), np.float32)
+    for other in other_goldens:
+        og = cv2.cvtColor(other, cv2.COLOR_BGR2GRAY)
+        H0 = _coarse(lm, og)
+        if H0 is None:
+            continue
+        worst = np.minimum(worst, _find(lm, og, H0, lm.points)[1])
+    lm.points = lm.points[worst >= LM_STABLE]
+    return lm
+
+
+def _coarse(lm: Landmarks, img: np.ndarray) -> np.ndarray | None:
+    """Rough test -> golden homography from SIFT on small copies, full-resolution pixels."""
+    tk = _keypoints_at(img, LM_COARSE_SIDE)
+    gk = lm.coarse
+    if tk.desc is None or gk.desc is None or len(tk.kp) < LM_COARSE_MIN or len(gk.kp) < 2:
+        return None
+    idx, dist = _knn2(tk.desc, gk)
+    good = np.nonzero(dist[:, 0] < 0.75 * dist[:, 1])[0]
+    if len(good) < LM_COARSE_MIN:
+        return None
+    src = np.float32([tk.kp[q].pt for q in good])
+    dst = np.float32([gk.kp[t].pt for t in idx[good, 0]])
+    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
+    if H is None or int(mask.sum()) < LM_COARSE_MIN:
+        return None
+    H = np.diag([1.0 / gk.k, 1.0 / gk.k, 1.0]) @ H @ np.diag([tk.k, tk.k, 1.0])
+    return H / H[2, 2]
+
+
+def _fit(lm: Landmarks, img: np.ndarray, H0: np.ndarray) -> tuple[np.ndarray | None, int, float]:
+    """(homography, landmarks used, fit RMS px) from the landmarks found via H0."""
+    if len(lm.points) < LM_MIN:
+        return None, 0, float("inf")
+    src, q = _find(lm, img, H0, lm.points)
+    keep = q >= LM_MATCH
+    if keep.sum() < LM_MIN:
+        return None, int(keep.sum()), float("inf")
+    H, mask = cv2.findHomography(src[keep], lm.points[keep].astype(np.float32), cv2.RANSAC, 2.0)
+    if H is None or int(mask.sum()) < LM_MIN:
+        return None, int(keep.sum()), float("inf")
+    used = mask.ravel() > 0
+    proj = cv2.perspectiveTransform(src[keep][used][None], H)[0]
+    rms = float(np.sqrt(((proj - lm.points[keep][used]) ** 2).sum(1).mean()))
+    return H / H[2, 2], int(used.sum()), rms
+
+
+def register_landmarks(lm: Landmarks, img: np.ndarray, ref: Keypoints | None = None) -> Registration:
+    """Test -> golden-1 homography from the landmarks, or register() when they
+    cannot be trusted. `ref` is golden 1's full SIFT keypoints for that fallback.
+    Registration.note says which way it went."""
+    tried = []
+    for how, H0 in (("last board's alignment", lm.last_H), ("rough SIFT", None)):
+        if how == "rough SIFT":
+            H0 = _coarse(lm, img)
+            if H0 is None:
+                tried.append("rough SIFT failed")
+                break
+        elif H0 is None:
+            continue
+        H, used, rms = _fit(lm, img, H0)
+        limit = LM_PRIOR_RMS if how.startswith("last") else LM_MAX_RMS
+        if H is None or rms > limit:
+            tried.append(f"{how}: {used} landmark(s), fit {rms:.1f} px")
+            continue
+        det = float(np.linalg.det(H[:2, :2]))
+        s, k = (ref.small, ref.k) if ref is not None else _small(lm.grey.astype(np.uint8))
+        i_s = cv2.resize(img, (0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA) if k < 1 else img
+        Hs = np.diag([k, k, 1.0]) @ H @ np.diag([1.0 / k, 1.0 / k, 1.0])
+        fit = _overlap_ncc(s, cv2.warpPerspective(i_s, Hs, (s.shape[1], s.shape[0])),
+                           cv2.warpPerspective(np.ones_like(i_s), Hs, (s.shape[1], s.shape[0])))
+        if not 0.25 < det < 4.0 or fit < REG_MIN_OVERLAP_NCC:
+            tried.append(f"{how}: aligned photo does not lie on the reference ({fit:.2f})")
+            continue
+        lm.last_H = H
+        return Registration(H, used, len(lm.points), f"landmarks via {how}, fit {rms:.1f} px", fit)
+    reg = register(ref if ref is not None else lm.grey.astype(np.uint8), img)
+    reg.note = "; ".join(filter(None, [reg.note, "SIFT (landmarks: " + "; ".join(tried) + ")"]))
+    return reg

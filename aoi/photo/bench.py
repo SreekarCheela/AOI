@@ -32,6 +32,7 @@ def machine() -> dict:
     import cv2
     import numpy as np
 
+    from .. import config
     from . import features
     cpu = platform.processor() or platform.machine()
     try:
@@ -49,7 +50,8 @@ def machine() -> dict:
         pass
     return dict(cpu=cpu, arch=platform.machine(), system=platform.platform(), cores=os.cpu_count(),
                 python=platform.python_version(), numpy=np.__version__, opencv=cv2.__version__,
-                opencv_threads=cv2.getNumThreads(), part_workers=features.WORKERS)
+                opencv_threads=cv2.getNumThreads(), part_workers=features.WORKERS,
+                registration=config.PHOTO_REGISTRATION)
 
 
 def throttled() -> str | None:
@@ -99,7 +101,7 @@ def text(b: dict) -> str:
     m, med = b["machine"], b["median_s"]
     lines = [f"{m['cpu']} ({m['arch']}, {m['cores']} cores), {m['system']}",
              f"Python {m['python']}, numpy {m['numpy']}, OpenCV {m['opencv']} ({m['opencv_threads']} threads), "
-             f"{m['part_workers']} part workers",
+             f"{m['part_workers']} part workers, registration: {m['registration']}",
              f"program {b['program']}, {b['parts']} parts, {len(b['photos'])} photo(s) x {b['repeat']} "
              f"= {b['runs']} runs, medians:", ""]
     for k in ORDER:

@@ -221,12 +221,14 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--truth", help="truth file (default: FOLDER/truth.json)")
     ev.add_argument("--boxes", help="parts.csv in the program's golden-1 pixels: locates parts the program never taught")
     ev.add_argument("--json", help="also write the full score here")
+    ev.add_argument("--registration", choices=("sift", "landmarks"), help="alignment method (default: config)")
     ev.set_defaults(fn=cmd_eval)
     bn = sub.add_parser("bench", help="time every inspection stage on this machine")
     bn.add_argument("--program", required=True, help="program name or folder")
     bn.add_argument("photos", help="a board photo or a folder of them (golden* files are skipped)")
     bn.add_argument("--repeat", type=int, default=3, help="passes over the photos after one warm-up")
     bn.add_argument("--json", help="also write the numbers here")
+    bn.add_argument("--registration", choices=("sift", "landmarks"), help="alignment method (default: config)")
     bn.set_defaults(fn=cmd_bench)
     dr = sub.add_parser("doctor", help="check this machine is ready to run the app")
     dr.set_defaults(fn=cmd_doctor)
@@ -239,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     td.add_argument("--no-cc0", action="store_true", help="leave out the CC0 public PCB set")
     td.set_defaults(fn=cmd_train_detector)
     a = ap.parse_args(argv)
+    if getattr(a, "registration", None):
+        config.PHOTO_REGISTRATION = a.registration
     return (a.fn if a.cmd else cmd_gui)(a)
 
 

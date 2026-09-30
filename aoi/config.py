@@ -349,6 +349,11 @@ PHOTO_REL_SHARPNESS: float = 0.5        # test sharpness vs golden median
 PHOTO_GLARE_LEVEL: int = 250            # max(B, G, R) at or above this is blown out
 PHOTO_MAX_GLARE_FRAC: float = 0.25      # of body pixels -> that part NOT CHECKED
 REG_MIN_OVERLAP_NCC: float = 0.5        # aligned photo must lie on the reference
+# How a test photo is aligned onto golden 1: "sift" (whole-photo SIFT, the
+# default) or "landmarks" (patches found at full resolution, falling back to
+# SIFT; aoi/photo/register.py). Landmarks are ~4x faster; they stay opt-in until
+# a held-out board set shows they call no worse. AOI_REGISTRATION overrides.
+PHOTO_REGISTRATION: str = __import__("os").environ.get("AOI_REGISTRATION", "sift")
 PHOTO_OFFSET_SIGMA_K: float = 3.0       # offset flagged above max(MAX_OFFSET_UM, k sigma)
 PHOTO_UNINSPECTED_FRAC: float = 0.10    # wholly uninspected parts before board REVIEW
 PHOTO_CALIBRATE_MIN_LABELS: int = 30    # operator labels before a score becomes P=

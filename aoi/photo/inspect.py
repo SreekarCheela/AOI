@@ -44,6 +44,7 @@ class Golden:
         self.frame = F.Frame.of(self.bgr)
         self.keypoints = register.keypoints(self.grey)
         self.sharpness = float(np.median([gate.sharpness(load_bgr(p)) for p in program.golden_paths()]))
+        self._landmarks: register.Landmarks | None = None
         sp = program.spread_path
         self.spread = np.load(sp) if sp.exists() else None
         self._board_mask: np.ndarray | None = None
@@ -54,6 +55,21 @@ class Golden:
         if self._board_mask is None:
             self._board_mask = gate.board_mask(self.bgr)
         return self._board_mask
+
+    @property
+    def landmarks(self) -> register.Landmarks:
+        """Golden 1's registration landmarks (register.make_landmarks), checked
+        against the other golden shots; built the first time they are asked for."""
+        if self._landmarks is None:
+            others = [load_bgr(p) for p in self.program.golden_paths()[1:]]
+            self._landmarks = register.make_landmarks(self.bgr, self.program.parts, others, self.board_mask)
+        return self._landmarks
+
+    def align(self, img_grey: np.ndarray) -> register.Registration:
+        """Test photo -> golden 1, the way config.PHOTO_REGISTRATION says."""
+        if config.PHOTO_REGISTRATION == "landmarks":
+            return register.register_landmarks(self.landmarks, img_grey, self.keypoints)
+        return register.register(self.keypoints, img_grey)
 
     def warm(self) -> None:
         """Do every part's golden-side work now (features.GoldenSide), so the
@@ -66,6 +82,8 @@ class Golden:
                 pass
         list(F.pool().map(one, self.program.parts))
         _ = self.board_mask
+        if config.PHOTO_REGISTRATION == "landmarks":
+            _ = self.landmarks
 
 
 # Goldens kept between runs. Building one decodes every golden photo, finds its
@@ -197,7 +215,7 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
                       single_golden=program.single_golden, stamp=program.stamp)
     bgr = load_bgr(image) if bgr is None else bgr
     lap("load")
-    reg = register.register(golden.keypoints, grey(bgr))
+    reg = golden.align(grey(bgr))
     lap("register")
     res.registration = dict(ok=reg.ok, inliers=reg.inliers, matches=reg.matches, fit=reg.fit, note=reg.note)
     if not reg.ok:

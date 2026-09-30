@@ -268,6 +268,19 @@ lower until it is taught.
 `inspect_photo.py` is the earlier one-script prototype. Its registration now
 lives in `aoi/photo/register.py`.
 
+**Registration.** By default each test photo is aligned onto golden 1 with
+SIFT over the whole photo (~150 ms on an M5, most of a second on a Pi). The
+`landmarks` mode is ~4x faster. It picks distinct patches on golden 1 away from
+every part (pads, silkscreen, holes), keeps only those every other golden shot
+finds again, and finds them at full resolution. The rough position comes from
+the last board's alignment, which on a fixed rig is almost always right, or else
+from SIFT on an 800 px copy. It then fits the transform, and falls back to full
+SIFT whenever the fit looks wrong. Try it with `--registration landmarks` on
+`eval` or `bench`, or `AOI_REGISTRATION=landmarks`. On the phone fixtures it
+catches the same defects as SIFT, with 13 false calls instead of 12 on Test 2
+and 12 instead of 14 on Test 1. That is in-sample, so SIFT stays the default
+until the planted-defect boards settle it.
+
 ### Running it on a Raspberry Pi 5
 
 The production machine is expected to be a Raspberry Pi 5, offline. It needs
