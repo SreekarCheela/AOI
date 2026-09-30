@@ -6,6 +6,7 @@
     python -m aoi_photo stats
     python -m aoi_photo eval    --program NAME DIR [--truth truth.json] [--boxes parts.csv]
     python -m aoi_photo bench   --program NAME PHOTOS [--repeat 3]   time every stage on this machine
+    python -m aoi_photo doctor                  is this machine ready (Python, packages, models, Pi health)
     python -m aoi_photo train-detector          retrain the part-box detector from taught boards
 
 Everything runs on this machine. Nothing is sent anywhere.
@@ -152,6 +153,13 @@ def cmd_bench(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(a: argparse.Namespace) -> int:
+    from aoi.photo import doctor
+    rows = doctor.checks()
+    print(doctor.text(rows))
+    return 1 if any(s == "FAIL" for s, _, _ in rows) else 0
+
+
 def cmd_stats(a: argparse.Namespace) -> int:
     from aoi.photo import record
     with record.Record(a.db) as rec:
@@ -220,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     bn.add_argument("--repeat", type=int, default=3, help="passes over the photos after one warm-up")
     bn.add_argument("--json", help="also write the numbers here")
     bn.set_defaults(fn=cmd_bench)
+    dr = sub.add_parser("doctor", help="check this machine is ready to run the app")
+    dr.set_defaults(fn=cmd_doctor)
     st = sub.add_parser("stats", help="false calls per package from operator labels")
     st.set_defaults(fn=cmd_stats)
     td = sub.add_parser("train-detector", help="retrain the part-box detector from taught boards (offline)")

@@ -721,6 +721,9 @@ def _ready(a, tmp_path, monkeypatch, rects=((100, 100, 60, 30), (200, 50, 40, 40
     """One golden uploaded, checked clean, and its parts found."""
     monkeypatch.setattr(app.gate, "golden_problems", lambda bgr: [])
     monkeypatch.setattr(app.teach, "propose_boxes", lambda bgr: list(rects))
+    # no OCR on a synthetic board with no text: loading the ~100 MB models on
+    # the suite's first read outlasted pump's timeout on a busy machine
+    monkeypatch.setattr(app.names, "available", lambda: False)
     a.dialogs.files = [str(_golden_png(tmp_path))]
     a.add_goldens()
     assert pump(a, lambda: idle(a) and len(a.boxes) == len(rects))

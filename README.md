@@ -268,6 +268,36 @@ lower until it is taught.
 `inspect_photo.py` is the earlier one-script prototype. Its registration now
 lives in `aoi/photo/register.py`.
 
+### Running it on a Raspberry Pi 5
+
+The production machine is expected to be a Raspberry Pi 5, offline. It needs
+the **64-bit, Trixie-based Raspberry Pi OS (Python 3.13)**. Bookworm ships
+Python 3.11, and numpy 2.5 and scipy 1.18 have no wheels for it. Get the 8 GB
+model with the active cooler, and use the official 27 W power supply.
+
+Every pinned package has a Linux aarch64 wheel for Python 3.13. The test suite
+passes on Python 3.13, and the fixture results are bit-identical there to 3.14
+(checked on macOS with the same pins; not yet on a Pi).
+
+```bash
+# on a machine with network (a Mac is fine): every wheel, the OCR models and
+# the part detector, ~720 MB
+scripts/pi_wheelhouse.sh pi-bundle
+
+# copy the repository and pi-bundle/ to the Pi, then on the Pi, no network needed:
+scripts/pi_setup.sh --bundle /media/usb/pi-bundle     # add --no-apt if python3-venv and python3-tk are installed
+.venv/bin/python -m aoi_photo doctor                   # anything missing, and whether the Pi has throttled
+.venv/bin/python -m aoi_photo bench --program NAME photos/test/
+```
+
+`scripts/pi_setup.sh` on its own (no `--bundle`) installs from apt and PyPI
+when the Pi has network. `requirements-pi.txt` is the run-time set: the full
+`requirements.txt` also carries the export tools of the channel-stack pipeline.
+
+iPhone HEIC photos are decoded on Linux by pillow-heif. macOS uses its built-in
+`sips`, which goes through a JPEG, so the same HEIC gives slightly different
+pixels on the two machines. JPEG, PNG and camera frames are the same everywhere.
+
 ## Known limits
 
 What the code gets wrong today is written down rather than left to be

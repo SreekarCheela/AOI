@@ -19,3 +19,6 @@ photos/
 
 # Photo AOI programs: golden photos copied in at teach
 programs/
+
+# Raspberry Pi install bundle (scripts/pi_wheelhouse.sh): wheels and model files
+pi-bundle/

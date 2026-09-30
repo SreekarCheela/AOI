@@ -98,3 +98,24 @@ def test_golden_is_kept_between_runs_per_program_version(monkeypatch, tmp_path):
     assert I.golden_for(v1) is a and a.warmed
     assert I.golden_for(v2) is not a              # a re-teach is a new version: a new golden
     assert built == [1, 2]
+
+
+def test_doctor_reports_every_dependency_with_a_status():
+    from aoi.photo import doctor
+    rows = doctor.checks()
+    assert {s for s, _, _ in rows} <= {"OK", "WARN", "FAIL"}
+    names = {w for _, w, _ in rows}
+    assert {"Python", "numpy", "opencv-python-headless", "tkinter", "part detector", "HEIC"} <= names
+    assert "ready" in doctor.text([("OK", "x", "y")])
+    assert "1 problem(s)" in doctor.text([("FAIL", "x", "y")])
+
+
+def test_pi_requirements_pin_what_the_main_set_pins():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    pins = lambda f: {l.split("==")[0]: l.split("==")[1].strip()                     # noqa: E731
+                      for l in (root / f).read_text().splitlines() if "==" in l and not l.startswith("#")}
+    main, pi = pins("requirements.txt"), pins("requirements-pi.txt")
+    shared = set(main) & set(pi)
+    assert {"numpy", "opencv-python-headless", "onnxruntime", "torch"} <= shared
+    assert {k: main[k] for k in shared} == {k: pi[k] for k in shared}   # one verified version of each

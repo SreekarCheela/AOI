@@ -1,0 +1,35 @@
+# The photo AOI app on a Raspberry Pi 5 (or any Linux aarch64/x86_64 box):
+# only what `python -m aoi_photo` needs at run time. The full requirements.txt
+# also carries the model-export tools of the channel-stack pipeline (onnx,
+# onnxscript), which the photo app never imports.
+#
+# Needs Python 3.12 or newer: numpy 2.5 and scipy 1.18 have no wheels for 3.11,
+# so Raspberry Pi OS must be the Trixie-based release (Python 3.13), not
+# Bookworm (3.11). Every pin below has a Linux aarch64 wheel for CPython 3.13
+# on PyPI (checked 2026-09-30); the suite passes and the fixture results are
+# bit-identical on 3.13 (macOS, same pins).
+#
+# Install with scripts/pi_setup.sh, which also installs rapidocr --no-deps (its
+# metadata asks for the GUI opencv-python, which would replace the headless one).
+numpy==2.5.2
+opencv-python-headless==5.0.0.93
+scipy==1.18.1
+scikit-learn==1.9.0
+pillow==12.3.0
+# HEIC from an iPhone: macOS reads it with its built-in `sips`, Linux needs this
+pillow-heif==1.8.0
+# part-box detector at teach (aoi/photo/detect.py); without it teach proposes
+# boxes from colour and asks for more hand-drawing
+torch==2.14.0
+# silkscreen names at teach: rapidocr (installed --no-deps) on onnxruntime,
+# and rapidocr's own dependencies
+onnxruntime==1.29.0
+pyclipper==1.4.0
+shapely==2.1.2
+omegaconf==2.3.1
+antlr4-python3-runtime==4.9.3
+PyYAML==6.0.3
+colorlog==6.12.0
+tqdm==4.70.1
+requests==2.34.2
+six==1.17.0

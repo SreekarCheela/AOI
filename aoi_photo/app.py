@@ -1292,13 +1292,18 @@ class App:
     # ------------------------------------------------------------ plumbing
     def _fonts(self) -> None:
         r = self.root
-        self.f_head = tkfont.Font(root=r, family="Helvetica", size=16, weight="bold")
-        self.f_big = tkfont.Font(root=r, family="Helvetica", size=20, weight="bold")
-        self.f_instr = tkfont.Font(root=r, family="Helvetica", size=14, weight="bold")
-        self.f_lab = tkfont.Font(root=r, family="Helvetica", size=12)
-        self.f_mono = tkfont.Font(root=r, family="Menlo", size=12)
-        self.f_small = tkfont.Font(root=r, family="Menlo", size=10)
-        self.f_bold = tkfont.Font(root=r, family="Helvetica", size=12, weight="bold")
+        # Helvetica and Menlo on a Mac; elsewhere (the Pi) Tk's own default and
+        # fixed families, since a missing family silently becomes a bitmap font
+        sans, mono = (("Helvetica", "Menlo") if sys.platform == "darwin" else
+                      (tkfont.nametofont("TkDefaultFont", root=r).actual("family"),
+                       tkfont.nametofont("TkFixedFont", root=r).actual("family")))
+        self.f_head = tkfont.Font(root=r, family=sans, size=16, weight="bold")
+        self.f_big = tkfont.Font(root=r, family=sans, size=20, weight="bold")
+        self.f_instr = tkfont.Font(root=r, family=sans, size=14, weight="bold")
+        self.f_lab = tkfont.Font(root=r, family=sans, size=12)
+        self.f_mono = tkfont.Font(root=r, family=mono, size=12)
+        self.f_small = tkfont.Font(root=r, family=mono, size=10)
+        self.f_bold = tkfont.Font(root=r, family=sans, size=12, weight="bold")
 
     def _style(self) -> None:
         # clam, because the native macOS theme ignores background colours and
