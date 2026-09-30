@@ -189,6 +189,22 @@ It also prints the machine it ran on, and on a Raspberry Pi it warns if the Pi
 throttled during the run. Run it on the production machine: numbers from a
 laptop do not carry over.
 
+`python -m aoi_photo label --program board photos/planted/` opens a window for
+writing that `truth.json`. Each photo is aligned onto golden 1 with every taught
+part boxed. Click a part and press its defect: `m` missing, `o` offset, `s` skew,
+`w` wrong part, `t` tombstone, `r` reversed, `k` marking differs, Delete to
+clear. `n`/`p` move to the next or previous photo and `g` marks a photo as a
+golden. A part the program never boxed can be typed in by name. Every change
+is saved at once.
+
+**Watching a folder.** `python -m aoi_photo inspect --program board --watch DIR`
+(or **Watch folder...** on the Inspect tab) inspects each photo that lands in
+DIR after it starts, until Ctrl-C or **Stop watching**. That can be an iPhone
+AirDropping into Downloads, a camera tool saving frames, or a share. A file is
+taken once its size has held for a poll, and hidden or temporary names
+(`.x`, `.part`, `.tmp`, `.download`) are skipped, so a photo still being copied
+is never read.
+
 `eval` scores a program on boards whose defects are known. The folder holds one
 photo per board and a `truth.json` listing each planted defect
 (`{"image": "board3", "refdes": "R7", "defect": "skew"}`; defects are `missing`,

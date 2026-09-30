@@ -3,10 +3,12 @@
     python -m aoi_photo                         the desktop app
     python -m aoi_photo teach   --golden DIR --parts parts.csv --name NAME [--px-per-mm X | --board-width-mm W]
     python -m aoi_photo inspect --program NAME DIR_OR_PHOTO
+    python -m aoi_photo inspect --program NAME --watch DIR   each photo as it lands in DIR (Ctrl-C stops)
     python -m aoi_photo stats
     python -m aoi_photo eval    --program NAME DIR [--truth truth.json] [--boxes parts.csv]
     python -m aoi_photo bench   --program NAME PHOTOS [--repeat 3]   time every stage on this machine
     python -m aoi_photo doctor                  is this machine ready (Python, packages, models, Pi health)
+    python -m aoi_photo label   --program NAME DIR   mark planted defects -> DIR/truth.json (for eval)
     python -m aoi_photo train-detector          retrain the part-box detector from taught boards
 
 Everything runs on this machine. Nothing is sent anywhere.
@@ -72,15 +74,20 @@ def cmd_inspect(a: argparse.Namespace) -> int:
     from aoi.photo import inspect as I, io, judge, program, record, report
     try:
         prog = program.resolve(a.program, a.programs)
-        golden = I.Golden(prog)
-        photos = io.photo_files(a.photos)
-    except io.PhotoError as e:
+        golden = I.golden_for(prog)
+        if a.watch:
+            from aoi.photo.watch import FolderWatch
+            photos = FolderWatch(a.photos)
+            print(f"watching {a.photos} for new photos (Ctrl-C to stop)", file=sys.stderr)
+        else:
+            photos = io.photo_files(a.photos)
+    except (io.PhotoError, NotADirectoryError) as e:
         print(f"cannot inspect: {e}", file=sys.stderr)
         return 2
-    if not photos:
+    if not a.watch and not photos:
         print(f"no photos in {a.photos}", file=sys.stderr)
         return 2
-    dup = sorted({f.stem for f in photos if sum(g.stem == f.stem for g in photos) > 1})
+    dup = [] if a.watch else sorted({f.stem for f in photos if sum(g.stem == f.stem for g in photos) > 1})
     if dup:
         print(f"photos share a name and their reports would overwrite each other: {', '.join(dup)}",
               file=sys.stderr)
@@ -95,18 +102,29 @@ def cmd_inspect(a: argparse.Namespace) -> int:
                                  prog.px_per_mm, prog.single_golden)
         calib = {c: f for c in ("missing", "offset", "skew", "polarity", "tombstone", "wrong_part")
                  if (f := judge.calibrate(rec.labels(c))) is not None}
-        for f, load in I.prefetch(photos):
-            t0 = time.time()
-            res, aligned = I.inspect(prog, f, golden, calib, bgr=load())
-            run_id = rec.save_run(res, pv)
-            paths = report.write_all(res, golden.bgr, aligned if aligned is not None else golden.bgr * 0, out)
-            rec.set_report(run_id, paths["annotated"], paths["html"])
-            print(f"{f.name}: {res.verdict} ({time.time() - t0:.1f} s) -> {paths['html']}")
-            if res.stamp:
-                print(f"  {res.stamp}")
-            for r in res.reasons:
-                print(f"  {r}")
-            worst = max(worst, {"PASS": 0, "REVIEW": 1, "FAIL": 2}[res.verdict])
+        try:
+            for f, load in I.prefetch(photos):
+                t0 = time.time()
+                try:
+                    res, aligned = I.inspect(prog, f, golden, calib, bgr=load())
+                except (io.PhotoError, OSError, ValueError) as e:
+                    if not a.watch:
+                        raise
+                    print(f"{f.name}: ERROR {e}", file=sys.stderr)       # watching: one bad photo never stops it
+                    continue
+                run_id = rec.save_run(res, pv)
+                paths = report.write_all(res, golden.bgr, aligned if aligned is not None else golden.bgr * 0, out)
+                rec.set_report(run_id, paths["annotated"], paths["html"])
+                print(f"{f.name}: {res.verdict} ({time.time() - t0:.1f} s) -> {paths['html']}", flush=True)
+                if res.stamp:
+                    print(f"  {res.stamp}")
+                for r in res.reasons:
+                    print(f"  {r}")
+                worst = max(worst, {"PASS": 0, "REVIEW": 1, "FAIL": 2}[res.verdict])
+        except KeyboardInterrupt:
+            if not a.watch:
+                raise
+            print("stopped watching", file=sys.stderr)
     return worst
 
 
@@ -151,6 +169,20 @@ def cmd_bench(a: argparse.Namespace) -> int:
         Path(a.json).write_text(json.dumps(b, indent=1))
         print(f"-> {a.json}")
     return 0
+
+
+def cmd_label(a: argparse.Namespace) -> int:
+    from aoi.photo import io, program
+    try:
+        prog = program.resolve(a.program, a.programs)
+    except io.PhotoError as e:
+        print(f"cannot label: {e}", file=sys.stderr)
+        return 2
+    if not Path(a.photos).is_dir():
+        print(f"{a.photos}: not a folder", file=sys.stderr)
+        return 2
+    from aoi_photo.label import main as label_main
+    return label_main(prog, a.photos)
 
 
 def cmd_doctor(a: argparse.Namespace) -> int:
@@ -214,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     i = sub.add_parser("inspect", help="inspect test photos (one per board)")
     i.add_argument("--program", required=True, help="program name or folder")
     i.add_argument("photos", help="a photo or a folder of them")
+    i.add_argument("--watch", action="store_true",
+                   help="keep watching the folder and inspect each new photo as it lands (Ctrl-C stops)")
     i.set_defaults(fn=cmd_inspect)
     ev = sub.add_parser("eval", help="score a program on photos with known defects (truth.json)")
     ev.add_argument("--program", required=True, help="program name or folder")
@@ -230,6 +264,10 @@ def main(argv: list[str] | None = None) -> int:
     bn.add_argument("--json", help="also write the numbers here")
     bn.add_argument("--registration", choices=("sift", "landmarks"), help="alignment method (default: config)")
     bn.set_defaults(fn=cmd_bench)
+    lb = sub.add_parser("label", help="mark which defects were planted on which board photo (truth.json)")
+    lb.add_argument("--program", required=True, help="program the boards were taught as")
+    lb.add_argument("photos", help="folder of board photos; truth.json is written there")
+    lb.set_defaults(fn=cmd_label)
     dr = sub.add_parser("doctor", help="check this machine is ready to run the app")
     dr.set_defaults(fn=cmd_doctor)
     st = sub.add_parser("stats", help="false calls per package from operator labels")

@@ -1048,3 +1048,28 @@ def test_bug_h_results_for_an_earlier_run_show_crops_and_the_highlight(tmp_path,
         assert "answered 1 of 2" in a.l_rprogress.cget("text")
     finally:
         a.close()
+
+
+def test_watch_folder_inspects_each_photo_as_it_lands_and_stops(gui, monkeypatch, tmp_path):
+    a = gui
+
+    def inspect(prog, f, golden, calib, bgr=None):
+        res = BoardResult(str(f), "demo", 1, "PASS",
+                          parts=[PartResult(Part("R1", 1, 1, 10, 10), [Call("offset", "OK")])])
+        return res, np.full((60, 80, 3), 200, np.uint8)
+    prog, written = _fake_inspect_setup(monkeypatch, tmp_path, inspect)
+    monkeypatch.setattr(a, "_inspect_program", lambda: prog)
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    cv2.imwrite(str(drop / "old.png"), np.zeros((30, 40, 3), np.uint8))     # there before: not inspected
+    monkeypatch.setattr(app.filedialog, "askdirectory", lambda **k: str(drop))
+    a.toggle_watch()
+    assert a.watching == drop and a.b_watch.cget("text") == "Stop watching"
+    cv2.imwrite(str(drop / "board1.png"), np.zeros((30, 40, 3), np.uint8))
+    assert pump(a, lambda: a.t_inspect.get_children() and a.t_inspect.set("0", "verdict") == "PASS")
+    cv2.imwrite(str(drop / "board2.png"), np.zeros((30, 40, 3), np.uint8))
+    assert pump(a, lambda: len(a.t_inspect.get_children()) == 2 and a.t_inspect.set("1", "verdict") == "PASS")
+    assert [p.name for p in a.inspect_photos] == ["board1.png", "board2.png"]
+    a.toggle_watch()                                             # stop
+    assert pump(a, lambda: idle(a) and a.watching is None)
+    assert a.b_watch.cget("text") == "Watch folder..."

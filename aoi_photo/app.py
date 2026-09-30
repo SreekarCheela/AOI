@@ -954,7 +954,7 @@ def warm_golden(prog: program.Program) -> None:
         pass
 
 
-def inspect_worker(q: queue.Queue, prog: program.Program, photos: list[Path], db: Path,
+def inspect_worker(q: queue.Queue, prog: program.Program, photos, db: Path,
                    out_dir: Path) -> None:
     """`python -m aoi_photo inspect`'s loop, one queue message per board.
 
@@ -1222,6 +1222,8 @@ class App:
 
         # Inspect tab
         self.inspect_photos: list[Path] = []
+        self.watching: Path | None = None           # folder being watched (Watch folder...)
+        self._watch_stop: threading.Event | None = None
         self.inspect_runs: dict[str, int] = {}
         self.inspect_errors: dict[str, str] = {}
         self.inspect_name: str | None = None
@@ -1268,6 +1270,7 @@ class App:
             "teach_error": self._on_teach_error,
             "teach_selfcheck": self._on_teach_selfcheck,
             "inspect_golden": self._on_inspect_golden,
+            "inspect_new": self._on_inspect_new,
             "inspect_row": self._on_inspect_row,
             "inspect_error": self._on_inspect_error,
             "inspect_fatal": self._on_inspect_fatal,
@@ -1421,6 +1424,8 @@ class App:
         self.close()
 
     def close(self) -> None:
+        if self._watch_stop is not None:
+            self._watch_stop.set()
         self.root.after_cancel(self._poll_id)
         self.rec.close()
         self.root.destroy()
@@ -2392,6 +2397,8 @@ class App:
         self.b_clear.pack(side="left", padx=4)
         self.b_run = ttk.Button(bar, text="Run", style="Accent.TButton", command=self.run_inspect)
         self.b_run.pack(side="left", padx=(12, 0))
+        self.b_watch = ttk.Button(bar, text="Watch folder...", command=self.toggle_watch)
+        self.b_watch.pack(side="left", padx=(8, 0))
         self.pb = ttk.Progressbar(bar, mode="determinate", length=200)
         self.pb.pack(side="left", padx=12)
         self.l_iprogress = self._label(bar, "", fg=DIM, font=self.f_mono)
@@ -2471,6 +2478,8 @@ class App:
         for w in (self.b_add_tests, self.b_clear, self.b_run):
             w.configure(state=off)
         self.c_iprog.configure(state="disabled" if running else "readonly")
+        self.b_watch.configure(text="Stop watching" if self.watching else "Watch folder...",
+                               state="normal" if self.watching or not running else "disabled")
         sel = self.t_inspect.selection()
         self.b_review.configure(state="normal" if sel and sel[0] in self.inspect_runs else "disabled")
         self.l_iinstr.configure(text=self._inspect_instruction())
@@ -2478,6 +2487,9 @@ class App:
     def _inspect_instruction(self) -> str:
         if not self.program_infos or self._inspect_program() is None:
             return "Set up a board first (tab 1): nothing here can be inspected without a saved program."
+        if self.watching:
+            return (f"Watching {self.watching}: every photo that lands there is inspected "
+                    f"({self.inspect_done} so far). Click a board to see it.")
         if "inspect" in self.busy:
             return f"Inspecting {self.inspect_done} of {len(self.inspect_photos)}... click a finished board to see it."
         if not self.inspect_photos:
@@ -2549,6 +2561,48 @@ class App:
                     self.inspect_out)
         self._sync_inspect()
 
+    def toggle_watch(self) -> None:
+        """Watch a folder: inspect every photo that lands in it until stopped
+        (aoi/photo/watch.py). The rows arrive as the photos do."""
+        if self.watching:
+            if self._watch_stop is not None:
+                self._watch_stop.set()
+            self.status("stopping: the photo being inspected finishes first")
+            return
+        if "inspect" in self.busy:
+            return
+        prog = self._inspect_program()
+        if prog is None:
+            self.status("choose a program to inspect against (set one up on tab 1)", error=True)
+            return
+        folder = filedialog.askdirectory(parent=self.root, title="Folder to watch for new board photos")
+        if not folder:
+            return
+        from aoi.photo.watch import FolderWatch
+        self.clear_tests()
+        self._watch_stop = threading.Event()
+        q = self.q
+        try:
+            photos = FolderWatch(folder, self._watch_stop, on_new=lambda f: q.put(("inspect_new", f)))
+        except NotADirectoryError as e:
+            self.status(str(e), error=True)
+            return
+        self.watching = Path(folder)
+        self.inspect_out = new_run_dir(self.runs_root, prog.name)
+        self._inspect_fatal = ""
+        self._auto_pick = True
+        self.status(f"watching {folder} against {prog.name} v{prog.version} -> {self.inspect_out}")
+        self._spawn("inspect", inspect_worker, prog, photos, self.db_path, self.inspect_out)
+        self._sync_inspect()
+
+    def _on_inspect_new(self, path: Path) -> None:
+        self.inspect_photos.append(path)
+        i = len(self.inspect_photos) - 1
+        self.t_inspect.insert("", "end", iid=str(i), values=(path.name, "queued", "", "", ""), tags=("queued",))
+        self.t_inspect.see(str(i))
+        self.pb.configure(maximum=len(self.inspect_photos))
+        self.l_iprogress.configure(text=f"{self.inspect_done} / {len(self.inspect_photos)}")
+
     def _step_progress(self) -> None:
         # Set, never step(): a determinate bar wraps to 0 when it reaches maximum.
         self.inspect_done += 1
@@ -2595,6 +2649,7 @@ class App:
         messagebox.showerror("Inspection stopped", msg, parent=self.root)
 
     def _inspect_finished(self) -> None:
+        self.watching, self._watch_stop = None, None
         verdicts = [self.t_inspect.set(iid, "verdict") for iid in self.t_inspect.get_children()]
         counts = {v: verdicts.count(v) for v in ("PASS", "FAIL", "REVIEW", "ERROR") if v in verdicts}
         for iid in self.t_inspect.get_children():  # anything the worker never reached

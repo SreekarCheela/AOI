@@ -167,12 +167,16 @@ def _board_review(res: BoardResult, detail: str) -> BoardResult:
     return res
 
 
-def prefetch(photos: list[Path]) -> Iterator[tuple[Path, Callable[[], np.ndarray]]]:
+def prefetch(photos) -> Iterator[tuple[Path, Callable[[], np.ndarray]]]:
     """(photo, load) for each photo, the next one already loading in the
     background while the caller inspects this one. Decoding a 12 MP HEIC is
     ~130 ms, most of it in `sips`, off this process's CPU. load() returns the
     pixels or raises what load_bgr raised, so a bad photo fails in the caller's
     own try block like any other."""
+    if not isinstance(photos, (list, tuple)):     # a folder watch: no next photo to load ahead
+        for f in photos:
+            yield f, (lambda f=f: load_bgr(f))
+        return
     if not photos:
         return
     with ThreadPoolExecutor(1, thread_name_prefix="aoi-load") as ex:
