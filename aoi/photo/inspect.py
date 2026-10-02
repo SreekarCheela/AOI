@@ -43,7 +43,7 @@ class Golden:
         self.grey = grey(self.bgr)
         self.frame = F.Frame.of(self.bgr)
         self.keypoints = register.keypoints(self.grey)
-        self.sharpness = float(np.median([gate.sharpness(load_bgr(p)) for p in program.golden_paths()]))
+        self.sharpness = float(np.median([gate.relative_sharpness(load_bgr(p)) for p in program.golden_paths()]))
         self._landmarks: register.Landmarks | None = None
         sp = program.spread_path
         self.spread = np.load(sp) if sp.exists() else None
@@ -219,13 +219,14 @@ def inspect(program: Program, image: str | Path, golden: Golden | None = None,
                       single_golden=program.single_golden, stamp=program.stamp)
     bgr = load_bgr(image) if bgr is None else bgr
     lap("load")
-    reg = golden.align(grey(bgr))
+    img_grey = grey(bgr)
+    reg = golden.align(img_grey)
     lap("register")
     res.registration = dict(ok=reg.ok, inliers=reg.inliers, matches=reg.matches, fit=reg.fit, note=reg.note)
     if not reg.ok:
         return _board_review(res, f"could not align: {reg.note}; does not match program "
                                   f"{program.name} v{program.version}, or the photo is unusable"), None
-    problems = gate.test_problems(bgr, golden.sharpness, register.area_scale(reg))
+    problems = gate.test_problems(img_grey, golden.sharpness, register.area_scale(reg))
     lap("gate")
     if problems:
         warped, _ = register.warp_to_ref(bgr, reg.H, golden.bgr.shape)

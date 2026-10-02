@@ -226,9 +226,30 @@ class Landmarks:
     grey: np.ndarray              # golden 1, float32
     coarse: Keypoints             # golden 1's SIFT on the LM_COARSE_SIDE copy
     last_H: np.ndarray | None = None      # the last board's alignment (a fixed rig's prior)
+    _fit_ref: tuple | None = field(default=None, repr=False)   # golden 1's copy for the overlap check
+
+    def fit_ref(self) -> tuple[np.ndarray, float]:
+        if self._fit_ref is None:
+            self._fit_ref = _whole_factor_copy(self.grey.astype(np.uint8), REG_MAX_SIDE)
+        return self._fit_ref
+
+
+def _whole_factor_copy(img: np.ndarray, side: int) -> tuple[np.ndarray, float]:
+    """img reduced by the whole factor that brings its long side nearest `side`,
+    and the scale. OpenCV's area resize is ~1 ms on a 12 MP photo for a whole
+    factor and ~45 ms (several times that on a Raspberry Pi) for any other."""
+    f = max(1, round(max(img.shape[:2]) / side))
+    if f == 1:
+        return img, 1.0
+    return cv2.resize(img, None, fx=1.0 / f, fy=1.0 / f, interpolation=cv2.INTER_AREA), 1.0 / f
 
 
 def _keypoints_at(grey_img: np.ndarray, side: int, nfeatures: int = 4000) -> Keypoints:
+    # Not _whole_factor_copy: the landmark fit is sensitive to this rough
+    # alignment. An 806 px copy (5:1) in place of 800 moved the final alignment
+    # of one fixture photo by up to 58 px at a board corner and changed calls
+    # on 3 of 9 fixture runs (2026-10-02). Only reached when the last board's
+    # alignment does not fit, which on a fixed rig is the exception.
     k = min(1.0, side / max(grey_img.shape[:2]))
     s = cv2.resize(grey_img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA) if k < 1 else grey_img
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -376,8 +397,8 @@ def register_landmarks(lm: Landmarks, img: np.ndarray, ref: Keypoints | None = N
             tried.append(f"{how}: {used} landmark(s), fit {rms:.1f} px")
             continue
         det = float(np.linalg.det(H[:2, :2]))
-        s, k = (ref.small, ref.k) if ref is not None else _small(lm.grey.astype(np.uint8))
-        i_s = cv2.resize(img, (0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA) if k < 1 else img
+        s, k = lm.fit_ref()
+        i_s = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA) if k < 1 else img
         Hs = np.diag([k, k, 1.0]) @ H @ np.diag([1.0 / k, 1.0 / k, 1.0])
         fit = _overlap_ncc(s, cv2.warpPerspective(i_s, Hs, (s.shape[1], s.shape[0])),
                            cv2.warpPerspective(np.ones_like(i_s), Hs, (s.shape[1], s.shape[0])))

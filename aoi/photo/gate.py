@@ -26,6 +26,22 @@ def sharpness(bgr: np.ndarray) -> float:
     return float(cv2.Laplacian(_work(bgr), cv2.CV_64F).var())
 
 
+def _quick(img: np.ndarray) -> np.ndarray:
+    """Grey copy reduced by a whole factor to about PHOTO_WORK_SIDE. A whole
+    factor takes OpenCV's fast area path: ~1 ms for a 12 MP photo, against
+    ~45 ms (several times that on a Raspberry Pi) for the 2.52x of _work."""
+    g = grey(img) if img.ndim == 3 else img
+    f = max(1, round(max(g.shape[:2]) / config.PHOTO_WORK_SIDE))
+    return cv2.resize(g, None, fx=1.0 / f, fy=1.0 / f, interpolation=cv2.INTER_AREA) if f > 1 else g
+
+
+def relative_sharpness(img: np.ndarray) -> float:
+    """sharpness() on the _quick copy, for comparing a test photo with goldens
+    from the same camera (the goldens' value must come from here too). Its
+    scale differs from sharpness(), whose absolute limit stays at teach."""
+    return float(cv2.Laplacian(_quick(img), cv2.CV_64F).var())
+
+
 def board_mask(bgr: np.ndarray, side: int = config.PHOTO_WORK_SIDE) -> np.ndarray:
     """1 on the board, 0 off it, on a copy whose long side is `side` px.
 
@@ -83,8 +99,9 @@ def golden_problems(bgr: np.ndarray) -> list[str]:
 
 
 def test_problems(bgr: np.ndarray, golden_sharpness: float, area_scale: float) -> list[str]:
+    """golden_sharpness: the goldens' relative_sharpness. `bgr` may be the grey photo."""
     out = []
-    sh = sharpness(bgr)
+    sh = relative_sharpness(bgr)
     if golden_sharpness and sh < config.PHOTO_REL_SHARPNESS * golden_sharpness:
         out.append(f"blurrier than the goldens (sharpness {sh:.0f} vs {golden_sharpness:.0f}); reshoot")
     if area_scale and abs(area_scale - 1.0) > config.PHOTO_SCALE_TOL:

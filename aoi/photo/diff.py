@@ -213,14 +213,36 @@ def touch_up(ref_grey: np.ndarray, img_bgr: np.ndarray, ref_grad: np.ndarray | N
     return cv2.remap(img_bgr, gx + fx, gy + fy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
 
+# The LAB_SIGMA local mean is taken at 1/WIDE_DOWN resolution: a 201-tap blur
+# at working resolution was ~100 ms a plane on an M5 (several times that on a
+# Raspberry Pi) and a quarter of a board's CPU. Padded by WIDE_PAD (reflected,
+# as GaussianBlur's own border) so the board edge reads as it did. Against the
+# full-resolution blur on the 2026-09-28 fixture: at most 0.04 grey levels off
+# away from the crop edge, against a colour threshold of 15.
+WIDE_DOWN = 2
+WIDE_PAD = 80
+
+
+def _wide_blur(x: np.ndarray) -> np.ndarray:
+    """GaussianBlur(x, LAB_SIGMA) by way of a 1/WIDE_DOWN copy: area-averaged
+    down, blurred with the sigma that leaves the same total spread, linear up."""
+    k, P = WIDE_DOWN, WIDE_PAD
+    H, W = x.shape[:2]
+    # bottom and right padded a little more, to a multiple of k: an exact k:1 scale
+    xp = cv2.copyMakeBorder(x, P, P + (-(H + 2 * P)) % k, P, P + (-(W + 2 * P)) % k, cv2.BORDER_REFLECT_101)
+    h, w = xp.shape[:2]
+    sm = cv2.resize(xp, (w // k, h // k), interpolation=cv2.INTER_AREA)
+    sig = float(np.sqrt(LAB_SIGMA ** 2 - (k * k - 1) / 12.0) / k)
+    up = cv2.resize(cv2.GaussianBlur(sm, (0, 0), sig), (w, h), interpolation=cv2.INTER_LINEAR)
+    return up[P:P + H, P:P + W]
+
+
 def _norm_lab_planes(bgr: np.ndarray) -> list[np.ndarray]:
     """_norm_lab as three separate float32 planes, which is how _colour_diff reads them."""
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     L, a, b = cv2.split(lab)
-    Lm = cv2.GaussianBlur(L, (0, 0), LAB_SIGMA) + 1.0
-    am = cv2.GaussianBlur(a, (0, 0), LAB_SIGMA)
-    bm = cv2.GaussianBlur(b, (0, 0), LAB_SIGMA)
-    return [100.0 * L / Lm, (a - am) * AB_GAIN, (b - bm) * AB_GAIN]
+    Lm, am, bm = cv2.split(_wide_blur(lab))
+    return [100.0 * L / (Lm + 1.0), (a - am) * AB_GAIN, (b - bm) * AB_GAIN]
 
 
 def _norm_lab(bgr: np.ndarray) -> np.ndarray:

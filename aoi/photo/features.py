@@ -176,14 +176,118 @@ def _grad(g: np.ndarray) -> np.ndarray:
     return cv2.magnitude(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
 
 
+# ------------------------------------------------- correlation by spectrum
+# cv2.matchTemplate transforms its template again on every call and works out
+# the image's window sums with correlations of its own. Here every template is
+# a golden one, searched again on every board, and every window is a box (or a
+# box less a box), so: the golden spectra are kept between boards, window sums
+# come from integral images, and one test spectrum serves every template
+# searched over the same pixels (all the angles tried at one place). The same
+# formulas as OpenCV's, summed in another order: they agree with it to float
+# rounding (~1e-5 of a correlation), not to the bit. A part's search makes
+# ~40 of these; as matchTemplate calls they were ~45% of measuring it.
+def _fft_shape(h: int, w: int) -> tuple[int, int]:
+    return cv2.getOptimalDFTSize(h), cv2.getOptimalDFTSize(w)
+
+
+def _spectrum(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    p = np.zeros(shape, np.float32)
+    p[:a.shape[0], :a.shape[1]] = a
+    return cv2.dft(p, nonzeroRows=a.shape[0])
+
+
+def _corr(FI: np.ndarray, FT: np.ndarray, oh: int, ow: int) -> np.ndarray:
+    """sum over the template of image x template at each of oh x ow offsets."""
+    prod = cv2.mulSpectrums(FI, FT, 0, conjB=True)
+    return cv2.idft(prod, flags=cv2.DFT_REAL_OUTPUT | cv2.DFT_SCALE, nonzeroRows=oh)[:oh, :ow]
+
+
+def _box(S: np.ndarray, y: int, x: int, h: int, w: int, oh: int, ow: int) -> np.ndarray:
+    """Sum of the h x w box at (y, x), moved by every offset up to (oh, ow), from integral image S."""
+    return (S[y + h:y + h + oh, x + w:x + w + ow] - S[y:y + oh, x + w:x + w + ow]
+            - S[y + h:y + h + oh, x:x + ow] + S[y:y + oh, x:x + ow])
+
+
+class _RingMatch:
+    """local_shift's masked TM_CCOEFF_NORMED for the full ring (all ones but one
+    rectangle round the body), golden side kept:
+
+        R = sum(M T' I) / sqrt(sum(M T'^2) * (sum(M I^2) - sum(M I)^2 / sum(M)))
+
+    T' the template less its mean over the mask M, as OpenCV defines it."""
+
+    def __init__(self, geo: Geo, tpl: np.ndarray):
+        ring = geo.ring
+        zr, zc = np.flatnonzero((ring == 0).any(1)), np.flatnonzero((ring == 0).any(0))
+        r0, r1, c0, c1 = zr[0], zr[-1] + 1, zc[0], zc[-1] + 1
+        assert (ring == 0).sum() == (r1 - r0) * (c1 - c0), "ring is not one rectangle short"
+        self.rect = (int(r0), int(c0), int(r1 - r0), int(c1 - c0))
+        m = ring > 0
+        tc = np.where(m, tpl - tpl[m].mean(dtype=np.float64), 0.0)
+        self.norm = float((tc * tc).sum())
+        self.n = float(m.sum())
+        self.hw = tpl.shape
+        self.shape = _fft_shape(tpl.shape[0] + 2 * SEARCH, tpl.shape[1] + 2 * SEARCH)
+        self.F = _spectrum(tc.astype(np.float32), self.shape)
+
+    def __call__(self, big: np.ndarray) -> np.ndarray:
+        (H, W), (r0, c0, rh, rw) = self.hw, self.rect
+        oh, ow = big.shape[0] - H + 1, big.shape[1] - W + 1
+        num = _corr(_spectrum(big, self.shape), self.F, oh, ow)
+        S, SQ = cv2.integral2(big, sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F)
+        s1 = _box(S, 0, 0, H, W, oh, ow) - _box(S, r0, c0, rh, rw, oh, ow)
+        s2 = _box(SQ, 0, 0, H, W, oh, ow) - _box(SQ, r0, c0, rh, rw, oh, ow)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return (num / np.sqrt((s2 - s1 * s1 / self.n) * self.norm)).astype(np.float32)
+
+
+class _SqdiffSearch:
+    """TM_SQDIFF / template size of golden templates over one test image:
+
+        sum(I^2 over the window) - 2 sum(I T) + sum(T^2)
+
+    The image's spectrum is taken once per window searched, and `spectra` (a
+    golden cache) keeps each template's spectrum, its sum of squares and size."""
+
+    def __init__(self, img: np.ndarray, spectra: dict):
+        self.img = img
+        self.SQ = cv2.integral2(img, sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F)[1]
+        self.spectra = spectra
+        self._win: dict = {}
+
+    def __call__(self, key, tpl: np.ndarray, y0: int = 0, y1: int | None = None,
+                 x0: int = 0, x1: int | None = None) -> np.ndarray:
+        """The response of template `tpl` (cache key `key`) at every location
+        (y0..y1, x0..x1) of the image, inclusive; the whole image by default."""
+        th, tw = tpl.shape
+        y1 = self.img.shape[0] - th if y1 is None else y1
+        x1 = self.img.shape[1] - tw if x1 is None else x1
+        oh, ow = y1 - y0 + 1, x1 - x0 + 1
+        shape = _fft_shape(oh + th - 1, ow + tw - 1)
+        w = self._win.get((y0, x0, oh, ow))
+        if w is None:
+            w = self._win[(y0, x0, oh, ow)] = _spectrum(self.img[y0:y1 + th, x0:x1 + tw], shape)
+        t = self.spectra.get((key, shape))
+        if t is None:
+            t64 = tpl.astype(np.float64)
+            t = self.spectra[(key, shape)] = (_spectrum(tpl, shape), float((t64 * t64).sum()))
+        F, tn = t
+        r = _box(self.SQ, y0, x0, th, tw, oh, ow) - 2.0 * _corr(w, F, oh, ow) + tn
+        return r.astype(np.float32) / tpl.size
+
+
 # ------------------------------------------------------------ alignment
 def local_shift(geo: Geo, ref: Frame, img: Frame, ring: np.ndarray | None = None,
-                tpl: np.ndarray | None = None) -> tuple[float, float, float]:
+                tpl: np.ndarray | None = None, match: _RingMatch | None = None) -> tuple[float, float, float]:
     """Residual shift of the board round the part (body masked out), and match
-    quality. `tpl` is the golden window's gradient, when already computed."""
+    quality. `tpl` is the golden window's gradient, when already computed;
+    `match` its _RingMatch, used when the ring is the full one."""
     tpl = _grad(geo.cut(ref.grey)) if tpl is None else tpl
     big = _grad(geo.cut(img.grey, extra=SEARCH))
-    res = cv2.matchTemplate(big, tpl, cv2.TM_CCOEFF_NORMED, mask=geo.ring if ring is None else ring)
+    if match is not None and (ring is None or ring is geo.ring):
+        res = match(big)
+    else:
+        res = cv2.matchTemplate(big, tpl, cv2.TM_CCOEFF_NORMED, mask=geo.ring if ring is None else ring)
     res = np.nan_to_num(res, nan=-1.0, posinf=-1.0, neginf=-1.0)
     _, v, _, loc = cv2.minMaxLoc(res)
     sx, sy = subpixel(res, loc)
@@ -287,49 +391,96 @@ DE_KEEP = 3                     # coarse candidates refined at full resolution
 DE_CHUNK = 16                   # shifts per pass in _dE_many (a large IC has 625)
 
 
+def _de_planes(a: np.ndarray, geo: Geo, s: int) -> tuple[list[np.ndarray], int]:
+    """The body box grown by s on every side, as three contiguous channel planes:
+    what _dE_many reads, for shifts up to s."""
+    p = geo.p
+    c = a[geo.by - s:geo.by + p.h + s, geo.bx - s:geo.bx + p.w + s]
+    return [np.ascontiguousarray(c[..., i]) for i in range(3)], s
+
+
 def _dE_at(g: np.ndarray, t: np.ndarray, geo: Geo, ox: int, oy: int, step: int = 1) -> float:
-    return _dE_many(g, t, geo, [(ox, oy)], step)[0]
+    s = max(abs(ox), abs(oy))
+    return _dE_many(_de_planes(g, geo, 0), _de_planes(t, geo, s), geo, [(ox, oy)], step)[0]
 
 
-def _dE_many(g: np.ndarray, t: np.ndarray, geo: Geo, shifts: list[tuple[int, int]], step: int = 1) -> list[float]:
-    """_dE_at for several shifts, DE_CHUNK at a time in place: the same numbers
-    to the bit as one np.median over all of them, at under half the time. The
-    whole stack was ~100 MB of temporaries on a large IC (625 shifts), and U1
-    alone then set the board's time.
+def _dE_many(g: tuple, t: tuple, geo: Geo, shifts: list[tuple[int, int]], step: int = 1) -> list[float]:
+    """Median colour change over the body box at each shift of the test.
 
-    Same float32 operations in the same order: d = t - g, (d * d) * W2, the
-    three channels summed left to right (what .sum(-1) does over 3), sqrt, and
-    the median as np.median takes it (partition; mean of the middle two)."""
+    g, t: _de_planes of the golden (grown by 0) and the test (grown by at least
+    the largest shift).
+
+    The same numbers to the bit as the interleaved form it replaced: the same
+    float32 operations in the same order, d = t - g, (d * d) * W2, the three
+    channels summed left to right, and the median as np.median takes it
+    (partition; mean of the middle two). Two things are skipped because they
+    cannot change a bit: multiplying a and b by their weight of 1, and the sqrt
+    of every pixel. sqrt is correctly rounded and never decreasing, so the k-th
+    smallest sqrt is the sqrt of the k-th smallest sum; only the one or two
+    middle values are rooted. Separate planes run the arithmetic about 3x
+    faster than three interleaved channels."""
     p = geo.p
     if not shifts:
         return []
-    gw = g[geo.by:geo.by + p.h:step, geo.bx:geo.bx + p.w:step]
+    (g0, g1, g2), _ = g
+    tp, s = t
+    gw = [c[:p.h:step, :p.w:step] for c in (g0, g1, g2)]
+    hh, ww = gw[0].shape
+    w0 = _W2[0]
     chunks = [shifts[i:i + DE_CHUNK] for i in range(0, len(shifts), DE_CHUNK)]
 
     def one(sh: list[tuple[int, int]]) -> list[float]:
-        d = np.stack([t[geo.by + oy:geo.by + oy + p.h:step, geo.bx + ox:geo.bx + ox + p.w:step]
-                      for ox, oy in sh])
-        d -= gw
-        np.multiply(d, d, out=d)
-        d *= _W2
-        e = d[..., 0] + d[..., 1]
-        e += d[..., 2]
-        np.sqrt(e, out=e)
+        e = np.empty((len(sh), hh, ww), np.float32)
+        d = np.empty((hh, ww), np.float32)
+        for i, (ox, oy) in enumerate(sh):
+            rows, cols = slice(s + oy, s + oy + p.h, step), slice(s + ox, s + ox + p.w, step)
+            ei = e[i]
+            np.subtract(tp[0][rows, cols], gw[0], out=ei)
+            np.multiply(ei, ei, out=ei)
+            ei *= w0
+            for c in (1, 2):
+                np.subtract(tp[c][rows, cols], gw[c], out=d)
+                np.multiply(d, d, out=d)
+                ei += d
         e = e.reshape(len(sh), -1)
         k = e.shape[1] // 2
+        # partitioned as uint32: a non-negative float32 orders as its bit
+        # pattern does, and integer selection is ~20% quicker
+        u = e.view(np.uint32)
         if e.shape[1] % 2:
-            e.partition(k, axis=1)
-            m = e[:, k]
+            u.partition(k, axis=1)
+            m = np.sqrt(e[:, k])
         else:
-            e.partition([k - 1, k], axis=1)
-            m = (e[:, k - 1] + e[:, k]) / np.float32(2)
+            u.partition([k - 1, k], axis=1)
+            m = (np.sqrt(e[:, k - 1]) + np.sqrt(e[:, k])) / np.float32(2)
         return [float(v) for v in m]
 
     big = len(chunks) > 1 and p.w * p.h >= INNER_PART_PX
     return [v for vs in (inner().map(one, chunks) if big else map(one, chunks)) for v in vs]
 
 
-def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo, g: np.ndarray | None = None) -> float:
+DE_SIGMA = 1.5
+# GaussianBlur's own kernel radius for a float image: ksize = round(8 sigma + 1) | 1
+DE_HALO = (int(round(8 * DE_SIGMA + 1)) | 1) // 2
+
+
+def _blur_near(a: np.ndarray, geo: Geo, s: int) -> np.ndarray:
+    """GaussianBlur(a, DE_SIGMA) as _dE_many reads it, the body box grown by s,
+    from a crop only DE_HALO wider. Every pixel kept is at least the kernel
+    radius inside the crop, or the crop edge is the window's own edge, so each
+    sees the same pixels and the same border as a blur of the whole window and
+    comes out the same to the bit. Returned the size of the whole window (only
+    the grown box is filled)."""
+    p = geo.p
+    H, W = a.shape[:2]
+    y0, y1 = max(0, geo.by - s - DE_HALO), min(H, geo.by + p.h + s + DE_HALO)
+    x0, x1 = max(0, geo.bx - s - DE_HALO), min(W, geo.bx + p.w + s + DE_HALO)
+    out = np.empty_like(a)
+    out[y0:y1, x0:x1] = cv2.GaussianBlur(np.ascontiguousarray(a[y0:y1, x0:x1]), (0, 0), DE_SIGMA)
+    return out
+
+
+def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo, g: np.ndarray | tuple | None = None) -> float:
     """Median colour change over the body box, at the best small integer shift.
 
     Coarse to fine: every second shift on every second pixel first, then the
@@ -337,11 +488,16 @@ def _dE_med(gl: np.ndarray, tl: np.ndarray, geo: Geo, g: np.ndarray | None = Non
     until no neighbour is better. Every integer shift is within one step of a
     coarse one, and the blurred colour change is smooth in the shift, so this
     lands on the exhaustive minimum (checked on the 2026-09-25 fixture) at about
-    a tenth of the cost. Small grids are still searched exhaustively."""
+    a tenth of the cost. Small grids are still searched exhaustively.
+
+    g: gl already blurred, or its _de_planes (GoldenSide keeps those)."""
     p = geo.p
-    g = cv2.GaussianBlur(gl, (0, 0), 1.5) if g is None else g      # g: gl already blurred
-    t = cv2.GaussianBlur(tl, (0, 0), 1.5)
     s = max(2, int(0.08 * max(p.w, p.h)))
+    if g is None:
+        g = cv2.GaussianBlur(gl, (0, 0), DE_SIGMA)
+    if not isinstance(g, tuple):
+        g = _de_planes(g, geo, 0)
+    t = _de_planes(_blur_near(tl, geo, s), geo, s)
     if (2 * s + 1) ** 2 <= DE_EXHAUSTIVE:
         return min(_dE_many(g, t, geo, [(ox, oy) for oy in range(-s, s + 1) for ox in range(-s, s + 1)]))
     grid = sorted(set(range(-s, s + 1, 2)) | {s})
@@ -432,13 +588,14 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0,
         return gc[key]
 
     seen: dict[float, tuple] = {}
+    spectra = gc.setdefault("spectra", {})
+    full = _SqdiffSearch(tw, spectra)
 
     def at(a: float):
         """Full search at angle a: (value, response map, location)."""
         a = round(float(a), 6)
         if a not in seen:
-            tpl = tpl_at(g, a, 1.0)
-            res = cv2.matchTemplate(tw, tpl, cv2.TM_SQDIFF) / tpl.size
+            res = full((a, 1.0), tpl_at(g, a, 1.0))
             v, _, loc, _ = cv2.minMaxLoc(res)
             seen[a] = (float(v), res, loc)
         return seen[a]
@@ -463,10 +620,10 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0,
     g2 = gc["g2"]
     t2 = cv2.resize(tw, (tw.shape[1] // 2, tw.shape[0] // 2), interpolation=cv2.INTER_AREA)
     run = inner().map if p.w * p.h >= INNER_PART_PX else map
+    half = _SqdiffSearch(t2, spectra)
 
     def coarse_at(a: float) -> tuple:
-        tpl = tpl_at(g2, a, 0.5)
-        v, _, loc, _ = cv2.minMaxLoc(cv2.matchTemplate(t2, tpl, cv2.TM_SQDIFF) / tpl.size)
+        v, _, loc, _ = cv2.minMaxLoc(half((round(float(a), 6), 0.5), tpl_at(g2, a, 0.5)))
         return (v, float(a), loc)
 
     coarse = list(run(coarse_at, coarse_angles))
@@ -477,8 +634,7 @@ def place(geo: Geo, Bg: np.ndarray, Bt: np.ndarray, rng_deg: float = 20.0,
         gx, gy = min(max(2 * c_loc[0], 0), rx), min(max(2 * c_loc[1], 0), ry)
         lx0, lx1 = max(0, gx - PLACE_NEAR), min(rx, gx + PLACE_NEAR)
         ly0, ly1 = max(0, gy - PLACE_NEAR), min(ry, gy + PLACE_NEAR)
-        tpl = tpl_at(g, a, 1.0)
-        res = cv2.matchTemplate(tw[ly0:ly1 + th, lx0:lx1 + tw_], tpl, cv2.TM_SQDIFF) / tpl.size
+        res = full((round(float(a), 6), 1.0), tpl_at(g, a, 1.0), ly0, ly1, lx0, lx1)
         v, _, (x, y), _ = cv2.minMaxLoc(res)
         inside = ((0 < x < res.shape[1] - 1 or lx0 + x in (0, rx))
                   and (0 < y < res.shape[0] - 1 or ly0 + y in (0, ry)))
@@ -543,12 +699,9 @@ def body_rect(Bm: np.ndarray, geo: Geo) -> dict | None:
     mk = cv2.morphologyEx((Bm > 0.5).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
     mk = cv2.morphologyEx(mk, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, labels, st, _ = cv2.connectedComponentsWithStats(mk)
-    exp = np.zeros_like(mk); exp[geo.body] = 1
-    best, bo = 0, 0
-    for i in range(1, n):
-        o = int(((labels == i) & (exp > 0)).sum())
-        if o > bo:
-            best, bo = i, o
+    # pixels of each blob inside the box; the first of the largest, as a loop over blobs would pick
+    o = np.bincount(labels[geo.body].ravel(), minlength=n)[1:n]
+    best = 1 + int(np.argmax(o)) if len(o) and o.max() > 0 else 0
     if best == 0 or st[best, cv2.CC_STAT_AREA] < 0.12 * p.w * p.h:
         return None
     blob = labels == best
@@ -758,6 +911,7 @@ class GoldenSide:
         p = geo.p
         self.geo = geo
         self.grad = _grad(geo.cut(ref.grey))
+        self.ring_match = _RingMatch(geo, self.grad) if ring is geo.ring else None
         self.win = geo.cut(ref.bgr).astype(np.float32)
         self.levels = ring_levels(self.win, ring)
         self.lab = lab(self.win)
@@ -766,7 +920,7 @@ class GoldenSide:
         self.grey = cv2.cvtColor(np.clip(self.win, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
         self.core_body = float(self.B[geo.core].mean())
         self.gap = _gap_contrast(cv2.GaussianBlur(self.lab, (0, 0), 1.0), geo)
-        self.lab_blur = cv2.GaussianBlur(self.lab, (0, 0), 1.5)
+        self.lab_blur = _de_planes(cv2.GaussianBlur(self.lab, (0, 0), DE_SIGMA), geo, 0)
         self.orient = _orient(self.grey, geo)
         self.open_axes = open_axes(geo, self.B)
         self.rect = body_rect(self.B, geo)
@@ -805,7 +959,7 @@ def measure(ref: Frame, img: Frame, p: Part, *, is_golden: bool = False) -> dict
         return out
     geo, cls = gs.geo, gs.cls
     out["in_view"] = True
-    sx, sy, q = (0.0, 0.0, 1.0) if is_golden else local_shift(geo, ref, img, ring, gs.grad)
+    sx, sy, q = (0.0, 0.0, 1.0) if is_golden else local_shift(geo, ref, img, ring, gs.grad, gs.ring_match)
     out.update(local_dx=sx, local_dy=sy, local_q=q)
 
     g_win = gs.win
